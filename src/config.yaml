@@ -1,0 +1,21 @@
+# src/config.yaml
+
+seed: 42  # 전체 실험 시드
+
+data:
+  # 정제된 데이터 파일 이름 (data/processed/{fname}.parquet)
+  # 예: data/processed/yelp_TN.parquet  → fname: yelp_TN
+  fname: dataSample
+
+  # train/val/test 분할 비율 설정
+  test_size: 0.2   # 전체 중 20%를 test로 사용
+  val_size: 0.1    # 전체 중 10%를 validation으로 사용
+
+args:
+  device: cuda        # 'cuda' 또는 'cpu'
+  batch_size: 128     # 배치 크기 (너가 TN에서 쓰던 값)
+  num_epochs: 100     # 최대 학습 epoch 수
+  optimizer: adam     # adam / adamw / sgd / rmsprop
+  lr: 0.001           # learning rate (TN 설정)
+  dropout: 0.1        # Dropout 비율
+  patience: 5         # EarlyStopping patience
