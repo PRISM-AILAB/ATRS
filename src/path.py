@@ -10,7 +10,7 @@ PROCESSED_PATH = os.path.join(DATA_PATH, "processed")
 # utils / config
 UTILS_PATH = os.path.join(ROOT_DIR, "src")
 
-# 모델 저장 폴더
+# model/
 MODEL_PATH = os.path.join(ROOT_DIR, "model")
 SAVE_MODEL_PATH = os.path.join(MODEL_PATH, "save")
 

@@ -1,237 +1,225 @@
-# model/proposed.py
-
 import numpy as np
-import tensorflow as tf
-
-from typing import Dict, Tuple, Optional
-
-from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import (
-    Input,
-    Embedding,
-    Dense,
-    Flatten,
-    Dropout,
-    Conv1D,
-    GlobalMaxPooling1D,
-    Concatenate,
-    Lambda,
-    Layer,
-    MultiHeadAttention,
-    LayerNormalization,
-    Add,
-)
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from typing import Tuple, Dict
 
 # ============================================================
 # 0) Blocks
 # ============================================================
 
-def point_wise_feed_forward_network(d_model: int, dff: int) -> Sequential:
-    return Sequential(
-        [
-            Dense(dff, activation="relu"),
-            Dense(d_model, activation="linear"),
-        ],
-        name="PointWiseFFN",
-    )
+class PointWiseFFN(nn.Module):
+    def __init__(self, d_model: int, dff: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, dff),
+            nn.ReLU(),
+            nn.Linear(dff, d_model)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
-class SelfAttentionBlock(Layer):
+class SelfAttentionBlock(nn.Module):
     """
     Transformer-style self-attention block:
     MHA -> Add&Norm -> FFN -> Add&Norm
     """
+    def __init__(self, num_heads: int, key_dim: int, dff: int, dropout_rate: float = 0.1):
+        super().__init__()
+        # PyTorch MultiheadAttention expects embed_dim. 
+        # In the TF code, key_dim was passed. Assuming embed_dim = key_dim here based on TF logic.
+        self.mha = nn.MultiheadAttention(embed_dim=key_dim, num_heads=num_heads, batch_first=True)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.ln1 = nn.LayerNorm(key_dim)
+        self.ln2 = nn.LayerNorm(key_dim)
+        self.ffn = PointWiseFFN(key_dim, dff)
+        self.dropout_ffn = nn.Dropout(dropout_rate)
 
+    def forward(self, x):
+        # x: (B, SeqLen, Dim)
+        
+        # Self Attention
+        attn_output, _ = self.mha(x, x, x)
+        attn_output = self.dropout(attn_output)
+        out1 = self.ln1(x + attn_output)
+
+        # FFN
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout_ffn(ffn_output)
+        out2 = self.ln2(out1 + ffn_output)
+
+        return out2
+
+
+# ============================================================
+# 1) Proposed Model
+# ============================================================
+
+class ProposedModel(nn.Module):
     def __init__(
         self,
-        num_heads: int,
-        key_dim: int,
-        dff: int,
-        dropout_rate: float = 0.1,
-        epsilon: float = 1e-6,
-        **kwargs,
+        num_users: int,
+        num_items: int,
+        user_vocab_size: int,
+        item_vocab_size: int,
+        user_maxlen: int,
+        item_maxlen: int,
+        user_embedding_matrix: np.ndarray,
+        item_embedding_matrix: np.ndarray,
+        num_heads: int = 8,
+        id_dim: int = 128,
+        dropout: float = 0.1,
+        cnn_filters: int = 100,
+        cnn_kernel_size: int = 5,
+        ffn_dim: int = 2048,
     ):
-        super().__init__(**kwargs)
-        self.mha = MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=key_dim,
-            value_dim=key_dim,
-            name="MHA",
+        super().__init__()
+
+        # --- User Text Branch ---
+        self.user_text_emb = nn.Embedding.from_pretrained(
+            torch.FloatTensor(user_embedding_matrix), freeze=True, padding_idx=0
         )
-        self.dropout = Dropout(dropout_rate, name="Dropout")
-        self.add = Add(name="Add")
-        self.ln = LayerNormalization(epsilon=epsilon, name="LayerNorm")
-        self.ffn = point_wise_feed_forward_network(key_dim, dff)
+        self.user_cnn = nn.Conv1d(
+            in_channels=user_embedding_matrix.shape[1], 
+            out_channels=cnn_filters, 
+            kernel_size=cnn_kernel_size
+        )
+        self.user_aspect_proj = nn.Linear(cnn_filters, id_dim)
+        self.user_aspect_dropout = nn.Dropout(dropout)
 
-    def call(self, inputs, training=None):
-        # inputs: (B, T, D)
-        x = inputs
+        # --- User ID Branch ---
+        self.user_id_emb = nn.Embedding(num_users, id_dim)
 
-        att = self.mha(x, x, x)
-        att = self.dropout(att, training=training)
-        x = self.add([x, att])
-        x = self.ln(x)
+        # --- Item Text Branch ---
+        self.item_text_emb = nn.Embedding.from_pretrained(
+            torch.FloatTensor(item_embedding_matrix), freeze=True, padding_idx=0
+        )
+        self.item_cnn = nn.Conv1d(
+            in_channels=item_embedding_matrix.shape[1], 
+            out_channels=cnn_filters, 
+            kernel_size=cnn_kernel_size
+        )
+        self.item_aspect_proj = nn.Linear(cnn_filters, id_dim)
+        self.item_aspect_dropout = nn.Dropout(dropout)
 
-        ffn_out = self.ffn(x)
-        ffn_out = self.dropout(ffn_out, training=training)
-        x = self.add([x, ffn_out])
-        x = self.ln(x)
+        # --- Item ID Branch ---
+        self.item_id_emb = nn.Embedding(num_items, id_dim)
 
-        return x
+        # --- Projection for Attention ---
+        # Logic from TF: Concatenate (Aspect, ID) -> Linear -> Attention
+        concat_dim = id_dim * 2 
+        
+        if id_dim % num_heads != 0:
+            raise ValueError(f"id_dim ({id_dim}) must be divisible by num_heads ({num_heads}).")
+        
+        # In TF code, it projected to key_dim (id_dim // num_heads). 
+        # CAUTION: Standard Transformer preserves dim. TF code reduced it. 
+        # We follow TF logic: output dim = id_dim // num_heads.
+        self.key_dim = id_dim // num_heads
 
+        self.user_project = nn.Linear(concat_dim, self.key_dim)
+        self.user_proj_dropout = nn.Dropout(dropout)
+        
+        self.item_project = nn.Linear(concat_dim, self.key_dim)
+        self.item_proj_dropout = nn.Dropout(dropout)
 
-# ============================================================
-# 1) Proposed Model (MyModel)
-# ============================================================
+        # --- Shared Self Attention ---
+        self.sab = SelfAttentionBlock(
+            num_heads=num_heads, 
+            key_dim=self.key_dim, 
+            dff=ffn_dim, 
+            dropout_rate=dropout
+        )
 
-def build_proposed(
-    num_users: int,
-    num_items: int,
-    user_vocab_size: int,
-    item_vocab_size: int,
-    user_maxlen: int,
-    item_maxlen: int,
-    user_embedding_matrix: np.ndarray,
-    item_embedding_matrix: np.ndarray,
-    *,
-    num_heads: int = 8,
-    id_dim: int = 128,
-    dropout: float = 0.1,
-    learning_rate: float = 0.001,
-    cnn_filters: int = 100,
-    cnn_kernel_size: int = 5,
-    ffn_dim: int = 2048,
-    model_name: str = "Proposed",
-) -> Model:
-    """
-    Inputs (4):
-      - user_id_input: (B, 1)
-      - item_id_input: (B, 1)
-      - user_aspect_input: (B, user_maxlen)
-      - item_aspect_input: (B, item_maxlen)
+        # --- MLP ---
+        # Input to MLP is Concat(User_Attn_Out, Item_Attn_Out)
+        mlp_input_dim = self.key_dim * 2
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(mlp_input_dim, 128),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+            nn.ReLU() # TF used ReLU output
+        )
 
-    Output:
-      - rating prediction: (B, 1)
-    """
+    def forward(self, user_id, item_id, user_seq, item_seq):
+        # 1) User Text Branch
+        u_txt = self.user_text_emb(user_seq)  # (B, L, Emb)
+        u_txt = u_txt.permute(0, 2, 1)        # (B, Emb, L) for Conv1d
+        u_txt = F.relu(self.user_cnn(u_txt))  # (B, Filters, L_new)
+        # Global Max Pooling
+        u_txt = F.adaptive_max_pool1d(u_txt, 1).squeeze(2) # (B, Filters)
+        u_txt = self.user_aspect_proj(u_txt)
+        u_txt = self.user_aspect_dropout(u_txt)
 
-    # --- 1) user text: w2v embedding -> CNN -> pooling -> linear
-    user_aspect_input = Input(shape=(user_maxlen,), name="Input_UserText")
-    user_aspect_embedding = Embedding(
-        input_dim=user_vocab_size + 1,
-        output_dim=user_embedding_matrix.shape[1],
-        weights=[user_embedding_matrix],
-        input_length=user_maxlen,
-        trainable=False,
-        name="Embedding_UserText",
-    )(user_aspect_input)
+        # 2) User ID Branch
+        u_id = self.user_id_emb(user_id).squeeze(1) # (B, ID_Dim)
 
-    user_cnn = Conv1D(
-        filters=cnn_filters,
-        kernel_size=cnn_kernel_size,
-        activation="relu",
-        name="User_CNN",
-    )(user_aspect_embedding)
+        # 3) Item Text Branch
+        i_txt = self.item_text_emb(item_seq)  # (B, L, Emb)
+        i_txt = i_txt.permute(0, 2, 1)        # (B, Emb, L)
+        i_txt = F.relu(self.item_cnn(i_txt))
+        i_txt = F.adaptive_max_pool1d(i_txt, 1).squeeze(2)
+        i_txt = self.item_aspect_proj(i_txt)
+        i_txt = self.item_aspect_dropout(i_txt)
 
-    user_aspect_vec = GlobalMaxPooling1D(name="User_GlobalMaxPooling")(user_cnn)
-    user_aspect_vec = Dense(id_dim, activation="linear", name="User_Aspect_Linear")(user_aspect_vec)
-    user_aspect_vec = Dropout(dropout, name="Dropout_UserAspect")(user_aspect_vec)
+        # 4) Item ID Branch
+        i_id = self.item_id_emb(item_id).squeeze(1) # (B, ID_Dim)
 
-    # --- 2) user id embedding
-    user_id_input = Input(shape=(1,), name="user_id_input")
-    user_id_emb = Embedding(input_dim=num_users, output_dim=id_dim, name="user_id_emb")(user_id_input)
-    user_id_vec = Flatten(name="UserIDFlatten")(user_id_emb)
+        # 5) Concatenate & Project
+        u_vec = torch.cat([u_txt, u_id], dim=1)
+        i_vec = torch.cat([i_txt, i_id], dim=1)
 
-    # --- 3) item text: w2v embedding -> CNN -> pooling -> linear
-    item_aspect_input = Input(shape=(item_maxlen,), name="Input_ItemText")
-    item_aspect_embedding = Embedding(
-        input_dim=item_vocab_size + 1,
-        output_dim=item_embedding_matrix.shape[1],
-        weights=[item_embedding_matrix],
-        input_length=item_maxlen,
-        trainable=False,
-        name="Embedding_ItemText",
-    )(item_aspect_input)
+        u_vec = self.user_proj_dropout(self.user_project(u_vec))
+        i_vec = self.item_proj_dropout(self.item_project(i_vec))
 
-    item_cnn = Conv1D(
-        filters=cnn_filters,
-        kernel_size=cnn_kernel_size,
-        activation="relu",
-        name="Item_CNN",
-    )(item_aspect_embedding)
+        # 6) Self Attention
+        # Expand dims to (B, 1, D) for Attention
+        u_vec = u_vec.unsqueeze(1)
+        i_vec = i_vec.unsqueeze(1)
 
-    item_aspect_vec = GlobalMaxPooling1D(name="Item_GlobalMaxPooling")(item_cnn)
-    item_aspect_vec = Dense(id_dim, activation="linear", name="Item_Aspect_Linear")(item_aspect_vec)
-    item_aspect_vec = Dropout(dropout, name="Dropout_ItemAspect")(item_aspect_vec)
+        u_att = self.sab(u_vec)
+        i_att = self.sab(i_vec)
 
-    # --- 4) item id embedding
-    item_id_input = Input(shape=(1,), name="item_id_input")
-    item_id_emb = Embedding(input_dim=num_items, output_dim=id_dim, name="item_id_emb")(item_id_input)
-    item_id_vec = Flatten(name="ItemIDFlatten")(item_id_emb)
+        # Flatten
+        u_att = u_att.view(u_att.size(0), -1)
+        i_att = i_att.view(i_att.size(0), -1)
 
-    # --- 5) concat (user) / concat (item)
-    user_vec = Concatenate(name="Concat_UserReviewID")([user_aspect_vec, user_id_vec])
-    item_vec = Concatenate(name="Concat_ItemReviewID")([item_aspect_vec, item_id_vec])
-
-    # --- 6) self-attention on projected vectors
-    if id_dim % num_heads != 0:
-        raise ValueError(f"id_dim({id_dim}) must be divisible by num_heads({num_heads}).")
-
-    key_dim = id_dim // num_heads  
-
-    user_vec = Dense(units=key_dim, activation="linear", name="A_project")(user_vec)
-    user_vec = Dropout(dropout, name="Dropout_Aproject")(user_vec)
-    item_vec = Dense(units=key_dim, activation="linear", name="B_project")(item_vec)
-    item_vec = Dropout(dropout, name="Dropout_Bproject")(item_vec)
-
-    # (B, D) -> (B, 1, D)
-    user_vec = Lambda(lambda x: tf.expand_dims(x, axis=1), name="Expand_User")(user_vec)
-    item_vec = Lambda(lambda x: tf.expand_dims(x, axis=1), name="Expand_Item")(item_vec)
-
-    sab = SelfAttentionBlock(
-        num_heads=num_heads,
-        key_dim=key_dim,
-        dff=ffn_dim,
-        dropout_rate=dropout,
-        name="SelfAttentionBlock",
-    )
-
-    user_att = sab(user_vec)
-    item_att = sab(item_vec)
-
-    user_att = Flatten(name="Flatten_UserAtt")(user_att)
-    item_att = Flatten(name="Flatten_ItemAtt")(item_att)
-
-    # --- 7) final fusion
-    final = Concatenate(name="Concat_UserItem")([user_att, item_att])
-
-    # --- 8) prediction MLP
-    dense = Dense(128, activation="linear", name="Dense_128")(final)
-    dense = Dropout(dropout, name="Dropout_128")(dense)
-    dense = Dense(64, activation="linear", name="Dense_64")(dense)
-    dense = Dropout(dropout, name="Dropout_64")(dense)
-    output = Dense(1, activation="relu", name="Output")(dense)
-
-    model = Model(
-        inputs=[user_id_input, item_id_input, user_aspect_input, item_aspect_input],
-        outputs=output,
-        name=model_name,
-    )
-
-    model.compile(
-        optimizer=Adam(learning_rate=learning_rate),
-        loss="mean_squared_error",
-        metrics=["mean_absolute_error", "mean_squared_error"],
-    )
-
-    return model
+        # 7) Final Fusion & Output
+        final_vec = torch.cat([u_att, i_att], dim=1)
+        output = self.mlp(final_vec)
+        
+        return output
 
 
 # ============================================================
-# 2) tf.data.Dataset 생성: get_data_loader
+# 2) Dataset & DataLoader
 # ============================================================
+
+class RecommenderDataset(Dataset):
+    def __init__(self, user_ids, item_ids, user_seq, item_seq, labels):
+        self.user_ids = user_ids
+        self.item_ids = item_ids
+        self.user_seq = user_seq
+        self.item_seq = item_seq
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return {
+            "user_id": torch.tensor(self.user_ids[idx], dtype=torch.long),
+            "item_id": torch.tensor(self.item_ids[idx], dtype=torch.long),
+            "user_seq": torch.tensor(self.user_seq[idx], dtype=torch.long),
+            "item_seq": torch.tensor(self.item_seq[idx], dtype=torch.long),
+            "label": torch.tensor(self.labels[idx], dtype=torch.float32)
+        }
 
 def get_data_loader(
     args: dict,
@@ -240,28 +228,11 @@ def get_data_loader(
     user_seq: np.ndarray,
     item_seq: np.ndarray,
     labels: np.ndarray,
-    *,
     shuffle: bool = True,
-) -> tf.data.Dataset:
-
-    x_dict = {
-        "user_id_input": np.asarray(user_ids).astype("int32"),
-        "item_id_input": np.asarray(item_ids).astype("int32"),
-        "Input_UserText": np.asarray(user_seq).astype("int32"),
-        "Input_ItemText": np.asarray(item_seq).astype("int32"),
-    }
-    y = np.asarray(labels).astype("float32")
-
+):
+    dataset = RecommenderDataset(user_ids, item_ids, user_seq, item_seq, labels)
     batch_size = args.get("batch_size", 128)
-    seed = args.get("seed", 42)
-
-    ds = tf.data.Dataset.from_tensor_slices((x_dict, y))
-
-    if shuffle:
-        ds = ds.shuffle(buffer_size=len(y), seed=seed)
-
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return ds
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
 
 
 # ============================================================
@@ -270,51 +241,105 @@ def get_data_loader(
 
 def proposed_trainer(
     args: dict,
-    model: Model,
-    train_loader: tf.data.Dataset,
-    val_loader: tf.data.Dataset,
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
     best_model_path: str,
+    device: str = "cuda"
 ):
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.get("lr", 0.001))
+    criterion = nn.MSELoss()
+
     epochs = args.get("num_epochs", 100)
     patience = args.get("patience", 5)
+    
+    best_val_loss = float("inf")
+    patience_counter = 0
 
-    callbacks = [
-        EarlyStopping(
-            monitor="val_loss",
-            patience=patience,
-            mode="min",
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        ModelCheckpoint(
-            filepath=best_model_path,
-            monitor="val_loss",
-            save_best_only=True,
-            save_weights_only=False,
-            verbose=1,
-        ),
-    ]
+    print(f"Start Training on {device}...")
 
-    history = model.fit(
-        train_loader,
-        validation_data=val_loader,
-        epochs=epochs,
-        callbacks=callbacks,
-        verbose=1,
-    )
-    return history
+    for epoch in range(epochs):
+        # --- Training ---
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            
+            uid = batch["user_id"].to(device)
+            iid = batch["item_id"].to(device)
+            useq = batch["user_seq"].to(device)
+            iseq = batch["item_seq"].to(device)
+            label = batch["label"].to(device).unsqueeze(1) # (B, 1)
+
+            pred = model(uid, iid, useq, iseq)
+            loss = criterion(pred, label)
+            
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+        avg_train_loss = train_loss / len(train_loader)
+
+        # --- Validation ---
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch in val_loader:
+                uid = batch["user_id"].to(device)
+                iid = batch["item_id"].to(device)
+                useq = batch["user_seq"].to(device)
+                iseq = batch["item_seq"].to(device)
+                label = batch["label"].to(device).unsqueeze(1)
+
+                pred = model(uid, iid, useq, iseq)
+                loss = criterion(pred, label)
+                val_loss += loss.item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+
+        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+
+        # --- Early Stopping ---
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), best_model_path)
+            print("  -> Saved Best Model")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("  -> Early Stopping Triggered")
+                break
+
+    # Load best weights
+    model.load_state_dict(torch.load(best_model_path))
+    return model
 
 
 def proposed_tester(
     args: dict,
-    model: Model,
-    test_loader: tf.data.Dataset,
+    model: nn.Module,
+    test_loader: DataLoader,
+    device: str = "cuda"
 ) -> Tuple[np.ndarray, np.ndarray]:
-    preds = model.predict(test_loader).reshape(-1)
-
+    model.to(device)
+    model.eval()
+    
+    preds_list = []
     trues_list = []
-    for _, y in test_loader:
-        trues_list.append(y.numpy())
-    trues = np.concatenate(trues_list, axis=0).reshape(-1)
 
-    return preds, trues
+    with torch.no_grad():
+        for batch in test_loader:
+            uid = batch["user_id"].to(device)
+            iid = batch["item_id"].to(device)
+            useq = batch["user_seq"].to(device)
+            iseq = batch["item_seq"].to(device)
+            label = batch["label"].to(device)
+
+            pred = model(uid, iid, useq, iseq)
+            
+            preds_list.append(pred.cpu().numpy().flatten())
+            trues_list.append(label.cpu().numpy().flatten())
+
+    return np.concatenate(preds_list), np.concatenate(trues_list)

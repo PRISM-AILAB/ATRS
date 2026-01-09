@@ -1,5 +1,3 @@
-# src/ate.py
-
 import os
 import re
 import json
@@ -8,14 +6,10 @@ from typing import List, Optional, Tuple
 import pandas as pd
 from pyabsa import ATEPCCheckpointManager
 
-
 class ATEExtractor:
     """
-    PyABSA ATE(Aspect Term Extraction) wrapper.
-
-    - 원본 df index를 보존하기 위해: "<idx> [SEP] <text>" 형태로 marked_text 생성
-    - PyABSA 결과 json의 sentence 필드에는 보통 "<idx> [ SEP ] <text>" 처럼 변형되어 저장될 수 있어
-      공백 유무/형태 차이를 고려해 robust split을 제공.
+    PyABSA ATE (Aspect Term Extraction) wrapper.
+    It marks input text with "<idx> [SEP] <text>" to preserve the original DataFrame index.
     """
 
     def __init__(
@@ -46,7 +40,7 @@ class ATEExtractor:
         if text_col not in df.columns:
             raise KeyError(f"{text_col} column not found in DataFrame.")
 
-        # index 보존 + 결측 방지
+        # Prepend index to track rows: "index [SEP] text"
         texts = df[text_col].fillna("").astype(str)
         marked = df.index.astype(str) + " [SEP] " + texts
         return marked.tolist()
@@ -60,9 +54,7 @@ class ATEExtractor:
         pred_sentiment: bool = False,
         save_result: bool = True,
     ) -> None:
-        """
-        ATE 실행. save_result=True면 result_dir 아래에 json 파일(들)이 저장됨.
-        """
+        """Run ATE extraction."""
         texts = self._make_marked_texts(df, text_col=text_col)
 
         self.aspect_extractor.extract_aspect(
@@ -76,20 +68,15 @@ class ATEExtractor:
     @staticmethod
     def _safe_split_sentence(sentence: str) -> Tuple[Optional[int], str]:
         """
-        PyABSA 결과의 sentence는 ' [ SEP ] ' 또는 '[SEP]' 등으로 저장될 수 있어
-        다양한 변형을 허용해서 idx / text 복구.
+        Robust split for PyABSA output.
+        PyABSA might alter spaces around [SEP] (e.g., ' [ SEP ] ', '[SEP]').
         """
         if sentence is None:
             return None, ""
 
         s = str(sentence)
-
-        # 다양한 SEP 표기를 모두 허용:
-        #  - " [ SEP ] "
-        #  - "[ SEP ]"
-        #  - "[SEP]"
-        #  - " [SEP] "
-        # 등등을 커버
+        
+        # Regex to handle variable spacing around [SEP]
         pattern = r"\s*\[\s*SEP\s*\]\s*"
         parts = re.split(pattern, s, maxsplit=1)
 
@@ -100,14 +87,11 @@ class ATEExtractor:
             except Exception:
                 return None, s
 
-        # 분리 실패 시
         return None, s
 
     @staticmethod
     def load_results(json_paths: List[str]) -> pd.DataFrame:
-        """
-        PyABSA 결과 json들을 읽어서 하나의 df로 합침.
-        """
+        """Load and merge JSON results."""
         all_data = []
         for path in json_paths:
             with open(path, "r", encoding="utf-8") as f:
@@ -115,26 +99,22 @@ class ATEExtractor:
                 if isinstance(data, list):
                     all_data.extend(data)
                 else:
-                    # 혹시 dict 형태로 저장된 경우 대비
                     all_data.append(data)
 
-        df_ate = pd.DataFrame(all_data)
-        return df_ate
+        return pd.DataFrame(all_data)
 
     def results_to_aspect_df(self, df_ate: pd.DataFrame) -> pd.DataFrame:
-        """
-        df_ate에서 sentence 기반 index 복구 후, aspect 컬럼만 남긴 DF 생성.
-        """
+        """Recover original index from 'sentence' column and extract aspects."""
         if "sentence" not in df_ate.columns:
             raise KeyError("ATE results must contain 'sentence' column.")
 
         tmp = df_ate.copy()
-
+        
+        # Split index and text
         recovered = tmp["sentence"].apply(self._safe_split_sentence)
         tmp["recovered_index"] = recovered.apply(lambda x: x[0])
-        tmp["recovered_text"] = recovered.apply(lambda x: x[1])
-
-        # index 복구 성공한 행만 사용
+        
+        # Filter valid rows
         tmp = tmp.dropna(subset=["recovered_index"]).copy()
         tmp["recovered_index"] = tmp["recovered_index"].astype(int)
 
@@ -153,9 +133,7 @@ class ATEExtractor:
         *,
         aspect_col: str = "aspect",
     ) -> pd.DataFrame:
-        """
-        원본 df(index) 기준으로 df_aspect를 left join해서 aspect 컬럼 추가.
-        """
+        """Left join aspects to the original DataFrame."""
         if aspect_col not in df_aspect.columns:
             raise KeyError(f"{aspect_col} column not found in df_aspect.")
 
@@ -174,8 +152,9 @@ class ATEExtractor:
         pred_sentiment: bool = False,
         save_result: bool = True,
     ) -> pd.DataFrame:
-
-        # 1) ATE 실행
+        """Full pipeline: Extract -> Load -> Merge."""
+        
+        # 1. Extract
         self.extract(
             df=df,
             text_col=text_col,
@@ -184,27 +163,36 @@ class ATEExtractor:
             save_result=save_result,
         )
 
-        # 2) 결과 json 경로 결정
+        # 2. Find Result JSONs
         if result_json_paths is None:
-            # 현재 작업 디렉토리 기준으로 FAST_LCF 결과 json 탐색
+            # PyABSA usually saves in the current directory or result_dir with specific naming
             cwd = os.getcwd()
             result_json_paths = [
                 os.path.join(cwd, fn)
                 for fn in os.listdir(cwd)
-                if fn.lower().endswith(".json")
-                and "atepc" in fn.lower()
+                if fn.lower().endswith(".json") and "atepc" in fn.lower()
             ]
 
         if not result_json_paths:
-            raise FileNotFoundError(
-                f"No json results found. result_dir={self.result_dir}"
-            )
+            # Fallback: check result_dir if cwd has nothing
+            if os.path.exists(self.result_dir):
+                result_json_paths = [
+                    os.path.join(self.result_dir, fn)
+                    for fn in os.listdir(self.result_dir)
+                    if fn.lower().endswith(".json") and "atepc" in fn.lower()
+                ]
 
-        # 3) json -> df_ate -> df_aspect
+        if not result_json_paths:
+            print(f"Warning: No ATE JSON results found in {os.getcwd()} or {self.result_dir}.")
+            # Return original df with empty aspect list to prevent crash
+            df[aspect_col] = [[] for _ in range(len(df))]
+            return df
+
+        # 3. Load & Process
         df_ate = self.load_results(result_json_paths)
         df_aspect = self.results_to_aspect_df(df_ate)
         df_aspect = df_aspect.rename(columns={"aspect": aspect_col})
 
-        # 4) merge
+        # 4. Merge
         df_all = self.merge_aspects(df, df_aspect, aspect_col=aspect_col)
         return df_all
