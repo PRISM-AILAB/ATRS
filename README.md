@@ -27,7 +27,8 @@ Below is the project structure for quick reference.
 ├── model/                       # Model definitions and checkpoints
 │
 ├── src/                         # Core source code
-│   ├── bert.py                  # BERT-based embedding and feature extraction module
+│   ├── data.py                  # data preprocessing module
+│   ├── ate.py                   # Aspect term extraction module
 │   ├── config.yaml              # Model and training configuration file
 │   ├── path.py                  # Path and directory management utilities
 │   └── utils.py                 # Helper functions (data loading, metrics, etc.)
@@ -54,3 +55,6 @@ In the ATE module, a Transformer-based encoder processes tokenized review text t
 
 In the RS module, the extracted aspect terms are embedded using a convolutional neural network and integrated with user and item latent vectors. A self-attention mechanism is employed to model the relative importance within each representation. The resulting user and item representations are then combined and passed to a rating prediction network, which models user–item interactions to predict ratings.
 
+<p align="center">
+  <img src="data/ATRS Architecture.png" alt="ATRS model Architecture" width="800">
+</p>
