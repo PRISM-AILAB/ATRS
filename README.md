@@ -7,14 +7,22 @@ Official implementation of the paper:
 This repository provides the official implementation of ATRS (Aspect Term-aware Recommender System), a review-based recommendation framework that enhances preference modeling by increasing the informational density of user reviews. ATRS addresses the limitation of existing methods that indiscriminately process entire reviews, where aspect-relevant content is often diluted by contextual noise. To mitigate this issue, ATRS employs a BERT-based aspect term extraction model to identify product-related terms and filter irrelevant information from reviews. The extracted aspect terms are then encoded using a convolutional neural network and aggregated through a self-attention mechanism to construct aspect-aware user and item representations. Experiments conducted on Amazon and Yelp datasets demonstrate that ATRS consistently outperforms representative baselines, achieving average improvements of 19.54% in MAE and 11.89% in RMSE, which confirms the effectiveness of aspect-level refinement and informational density optimization in review-based recommender systems.
 
 ## Requirements
-- Python 3.10
-- pandas==2.3.3
-- numpy==2.2.6
-- scikit-learn==1.7.2
-- transformers==4.57.0
-- torch==2.8.0
-- torchvision==0.23.0
-- pyarrow==21.0.0
+- ﻿torch>=2.5.1
+- torchvision>=0.20.1
+- numpy==1.26.4
+- pandas>=2.0.0
+- gensim==4.3.3
+- pyarrow>=12.0.0
+- scikit-learn>=1.5.0
+- tqdm>=4.66.0
+- PyYAML>=6.0.0
+- sentencepiece==0.2.1
+- transformers==4.29.2
+- tokenizers==0.13.3
+- pyabsa==2.4.3
+- nltk>=3.9.0
+- seqeval>=1.2.0
+- termcolor>=2.0.0
 
 ## Repository Structure
 Below is the project structure for quick reference.
@@ -58,3 +66,137 @@ In the RS module, the extracted aspect terms are embedded using a convolutional 
 <p align="center">
   <img src="data/ATRS Architecture.png" alt="ATRS model Architecture" width="800">
 </p>
+
+## How to Run
+
+### Environment Setup
+Create a virtual environment and install all dependencies:
+```bash
+uv venv .venv -p [python version]
+uv pip install -r requirements.txt
+```
+
+### Data Preparation
+Place your dataset in the data/raw/ folder.
+
+### Configure (edit config.yaml)
+Set all training/data/model hyperparameters in src/config.yaml before running.
+
+### Train and Evaluate the Model
+Run the training script with configuration file:
+```bash
+uv run main.py
+```
+
+## Experimental Results
+
+The performance of MFNR was evaluated on three real-world review datasets: Musical Instruments, Video Games, Yelp(Pennsylvania). 
+Results show that the proposed model consistently outperforms existing baselines in all metrics.
+
+<div align="center">
+  <table> 
+    <thead> 
+      <tr>
+        <th rowspan="2">Model</th>
+        <th colspan="4">Musical Instruments</th> 
+        <th colspan="4">Video Games</th> 
+        <th colspan="4">Yelp</th> 
+      </tr>
+      <tr> 
+        <th>MAE</th> 
+        <th>MSE</th> 
+        <th>RMSE</th> 
+        <th>MAPE</th>
+        <th>MAE</th>
+        <th>MSE</th>
+        <th>RMSE</th>
+        <th>MAPE</th>
+        <th>MAE</th>
+        <th>MSE</th>
+        <th>RMSE</th>
+        <th>MAPE</th>
+      </tr>
+    </thead> 
+    <tbody> 
+      <tr> 
+        <td>PMF</td> 
+        <td>1.306</td><td>2.640</td><td>1.625</td><td>35.034</td> 
+        <td>1.220</td><td>2.407</td><td>1.551</td><td>33.948</td> 
+        <td>1.276</td><td>2.803</td><td>1.674</td><td>38.330</td> 
+      </tr>
+      <tr>
+        <td>NCF</td>
+        <td>1.174</td><td>1.705</td><td>1.306</td><td>35.401</td>
+        <td>0.948</td><td>1.331</td><td>1.154</td><td>35.032</td>
+        <td>1.085</td><td>1.674</td><td>1.294</td><td>39.320</td>
+      </tr>
+      <tr>
+        <td>DeepCoNN</td>
+        <td>0.786</td><td>1.137</td><td>1.067</td><td>29.931</td>
+        <td>0.847</td><td>1.263</td><td>1.124</td><td>32.850</td>
+        <td>0.937</td><td>1.381</td><td>1.175</td><td>38.276</td>
+      </tr>
+      <tr>
+        <td>NARRE</td>
+        <td>0.767</td><td>0.993</td><td>0.997</td><td>29.459</td>
+        <td>0.776</td><td>1.173</td><td>1.083</td><td>30.518</td>
+        <td>0.886</td><td>1.212</td><td>1.101</td><td>36.724</td>
+      </tr>
+      <tr>
+        <td>AENAR</td>
+        <td>0.665</td><td>0.970</td><td>0.985</td><td>27.193</td>
+        <td>0.693</td><td>1.002</td><td>1.001</td><td>28.039</td>
+        <td>0.845</td><td>1.177</td><td>1.085</td><td>35.605</td>
+      </tr>
+      <tr>
+        <td>SAFMR</td>
+        <td>0.705</td><td>0.975</td><td>0.987</td><td>28.388</td>
+        <td>0.711</td><td>1.033</td><td>1.016</td><td>30.016</td>
+        <td>0.881</td><td>1.229</td><td>1.109</td><td>36.076</td>
+      </tr>
+      <tr>
+        <td>MFNR</td>
+        <td>0.708</td><td>0.965</td><td>0.982</td><td>26.922</td>
+        <td>0.730</td><td>0.980</td><td>0.990</td><td>27.863</td>
+        <td>0.855</td><td>1.174</td><td>1.084</td><td>33.923</td>
+      </tr>
+      <tr>
+        <td><b>Proposed (ATRS)</b></td>
+        <td><b>0.640</b></td><td><b>0.933</b></td><td><b>0.966</b></td><td><b>26.638</b></td>
+        <td><b>0.646</b></td><td><b>0.970</b></td><td><b>0.985</b></td><td><b>27.537</b></td>
+        <td><b>0.832</b></td><td><b>1.163</b></td><td><b>1.078</b></td><td><b>34.917</b></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+      
+## Citation
+
+If you find this work useful in your research, please cite our paper:
+
+```bibtex
+@article{LIM2026123078,
+  title = {Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling},
+  journal = {Information Sciences},
+  volume = {735},
+  pages = {123078},
+  year = {2026},
+  issn = {0020-0255},
+  doi = {https://doi.org/10.1016/j.ins.2026.123078},
+  url = {https://www.sciencedirect.com/science/article/pii/S0020025526000095},
+  author = {Heena Lim and Xinzhe Li and Seonu Park and Qinglong Li and Jaekyeong Kim},
+}
+```
+
+## Contact
+
+For questions, collaborations, or feedback, please contact:  
+**Seonu Park (박선우)**  
+PHD Student, Department of Big Data Analytics, Kyung Hee University  
+Email: [sunu0087@khu.ac.kr](mailto:sunu0087@khu.ac.kr)
+
+**Qinglong Li (이청용)**  
+Assistant Professor, Division of Computer Engineering, Hansung University  
+Email: [leecy@hansung.ac.kr](mailto:leecy@hansung.ac.kr)
+
+_Last updated: **january 2026**_
