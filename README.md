@@ -192,7 +192,7 @@ If you find this work useful in your research, please cite our paper:
 
 For questions, collaborations, or feedback, please contact:  
 **Seonu Park (박선우)**  
-PHD Student, Department of Big Data Analytics, Kyung Hee University  
+Ph.D. Program, Department of Big Data Analytics, Kyung Hee University  
 Email: [sunu0087@khu.ac.kr](mailto:sunu0087@khu.ac.kr)
 
 **Qinglong Li (이청용)**  
