@@ -199,4 +199,4 @@ Email: [sunu0087@khu.ac.kr](mailto:sunu0087@khu.ac.kr)
 Assistant Professor, Division of Computer Engineering, Hansung University  
 Email: [leecy@hansung.ac.kr](mailto:leecy@hansung.ac.kr)
 
-_Last updated: **january 2026**_
+_Last updated: **January 2026**_
