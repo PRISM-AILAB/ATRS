@@ -1,12 +1,15 @@
 # ATRS
 
-Official implementation of the paper:
-> **Lim, H., Li, X., Park, S., Li, Q., & Kim, J. (2026). Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling. Information Sciences,**  [Paper Link](https://doi.org/10.1016/j.ins.2026.123078)
+Official implementation of:
+> Lim, H., Li, X., Park, S., Li, Q., & Kim, J. (2026). 
+**Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling**. 
+_Information Sciences_, 735, 123078.  [Paper](https://doi.org/10.1016/j.ins.2026.123078)
 
 ## Overview
-This repository provides the official implementation of ATRS (Aspect Term-aware Recommender System), a review-based recommendation framework that enhances preference modeling by increasing the informational density of user reviews. ATRS addresses the limitation of existing methods that indiscriminately process entire reviews, where aspect-relevant content is often diluted by contextual noise. To mitigate this issue, ATRS employs a BERT-based aspect term extraction model to identify product-related terms and filter irrelevant information from reviews. The extracted aspect terms are then encoded using a convolutional neural network and aggregated through a self-attention mechanism to construct aspect-aware user and item representations. Experiments conducted on Amazon and Yelp datasets demonstrate that ATRS consistently outperforms representative baselines, achieving average improvements of 19.54% in MAE and 11.89% in RMSE, which confirms the effectiveness of aspect-level refinement and informational density optimization in review-based recommender systems.
+This repository provides the official implementation of ATRS (Aspect Term-aware Recommender System), a review-based recommendation model that enhances preference modeling by increasing the informational density of user reviews. ATRS addresses the limitation of existing methods that indiscriminately process entire reviews, where aspect-relevant content is often diluted by contextual noise. To mitigate this issue, ATRS employs a BERT-based aspect term extraction (ATE) module to identify product-related terms and filter irrelevant information from reviews. The extracted aspect terms are then encoded using a convolutional neural network and aggregated through a self-attention mechanism to construct aspect-aware user and item representations. Experiments conducted on Amazon and Yelp datasets demonstrate that ATRS consistently outperforms representative baselines, achieving average improvements of 19.54% in MAE and 11.89% in RMSE. These results highlight the effectiveness of aspect-level refinement in review-based recommender systems.
 
 ## Requirements
+- ﻿python>=3.9
 - ﻿torch>=2.5.1
 - torchvision>=0.20.1
 - numpy==1.26.4
@@ -33,9 +36,10 @@ Below is the project structure for quick reference.
 │   └── processed/               # Preprocessed data for training/evaluation
 │
 ├── model/                       # Model definitions and checkpoints
+│   └── proposed.py              # ATRS model architecture and training utilities
 │
 ├── src/                         # Core source code
-│   ├── data.py                  # data preprocessing module
+│   ├── data.py                  # Data preprocessing module
 │   ├── ate.py                   # Aspect term extraction module
 │   ├── config.yaml              # Model and training configuration file
 │   ├── path.py                  # Path and directory management utilities
@@ -53,15 +57,15 @@ Below is the project structure for quick reference.
 
 ## Model Description
 
-ATRS (Aspect Term-aware Recommender System) is a review-based recommendation model designed to reduce contextual noise and enhance preference modeling by increasing the informational density of textual representations. Instead of processing entire reviews indiscriminately, ATRS explicitly focuses on aspect-level information that is directly relevant to target items.
+ATRS (Aspect Term-aware Recommender System) is a review-based recommendation model designed to reduce contextual noise and enhance preference modeling through aspect-level refinement of textual representations. Instead of processing entire reviews indiscriminately, ATRS explicitly focuses on item-relevant aspect information.
 
 The model consists of two main modules:
-- ATE (Aspect Term Extraction): identifies product-related aspect terms from review text.
-- RS (Recommender System): constructs aspect-aware user and item representations and predicts ratings.
+- **ATE (Aspect Term Extraction) Module:** Identifies product-related aspect terms from review text.
+- **RS (Recommender System) Module:** Constructs aspect-aware user and item representations and predicts ratings.
 
-In the ATE module, a Transformer-based encoder processes tokenized review text to capture contextual semantics. A Local Context Focus (LCF) mechanism refines token-level representations, and a BIO tagging scheme is applied to extract salient aspect terms.
+In the ATE module, a Transformer-based encoder processes tokenized review text to capture contextual semantics. A Local Context Focus (LCF) mechanism further refines token-level representations, and a BIO tagging scheme is applied to extract salient aspect terms.
 
-In the RS module, the extracted aspect terms are embedded using a convolutional neural network and integrated with user and item latent vectors. A self-attention mechanism is employed to model the relative importance within each representation. The resulting user and item representations are then combined and passed to a rating prediction network, which models user–item interactions to predict ratings.
+In the RS module, the extracted aspect terms are embedded using a convolutional neural network and integrated with user and item latent embeddings. A self-attention mechanism models the relative importance within each representation. The refined user and item representations are then combined and passed to a rating prediction network for final score estimation.
 
 <p align="center">
   <img src="data/ATRS Architecture.png" alt="ATRS model Architecture" width="800">
@@ -70,28 +74,38 @@ In the RS module, the extracted aspect terms are embedded using a convolutional 
 ## How to Run
 
 ### Environment Setup
-Create a virtual environment and install all dependencies:
+Create a virtual environment (Python ≥ 3.9 recommended) and install the required dependencies:
+
+#### Option A: Using venv
 ```bash
-uv venv .venv -p [python version]
-uv pip install -r requirements.txt
+python3.9 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+#### Option B: Using Conda
+```bash
+conda create -n atrs python=3.9
+conda activate atrs
+pip install -r requirements.txt
 ```
 
 ### Data Preparation
-Place your dataset in the data/raw/ folder.
+Place your dataset under `data/raw/` and ensure that its format matches the preprocessing pipeline defined in `src/data.py`.
 
-### Configure (edit config.yaml)
-Set all training/data/model hyperparameters in src/config.yaml before running.
+### Configuration
+Edit `src/config.yaml` to set training, data, and model hyperparameters before running.
 
 ### Train and Evaluate the Model
-Run the training script with configuration file:
+Run the training script:
 ```bash
-uv run main.py
+python main.py
 ```
 
 ## Experimental Results
 
-The performance of MFNR was evaluated on three real-world review datasets: Musical Instruments, Video Games, Yelp(Pennsylvania). 
-Results show that the proposed model consistently outperforms existing baselines in all metrics.
+ATRS was evaluated on three real-world review datasets: Musical Instruments, Video Games, and Yelp (Pennsylvania). 
+The results demonstrate that ATRS consistently outperforms representative baselines across all evaluation metrics, achieving average improvements of 19.54% in MAE and 11.89% in RMSE.
 
 <div align="center">
   <table> 
@@ -172,31 +186,32 @@ Results show that the proposed model consistently outperforms existing baselines
       
 ## Citation
 
-If you find this work useful in your research, please cite our paper:
+If you use this repository in your research, please cite:
 
 ```bibtex
 @article{LIM2026123078,
   title = {Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling},
+  author = {Heena Lim and Xinzhe Li and Seonu Park and Qinglong Li and Jaekyeong Kim},
   journal = {Information Sciences},
   volume = {735},
   pages = {123078},
   year = {2026},
-  issn = {0020-0255},
-  doi = {https://doi.org/10.1016/j.ins.2026.123078},
-  url = {https://www.sciencedirect.com/science/article/pii/S0020025526000095},
-  author = {Heena Lim and Xinzhe Li and Seonu Park and Qinglong Li and Jaekyeong Kim},
+  doi = {10.1016/j.ins.2026.123078}  
 }
 ```
 
 ## Contact
 
-For questions, collaborations, or feedback, please contact:  
-**Seonu Park (박선우)**  
-Ph.D. Program, Department of Big Data Analytics, Kyung Hee University  
-Email: [sunu0087@khu.ac.kr](mailto:sunu0087@khu.ac.kr)
+For research inquiries or collaborations, please contact:  
 
-**Qinglong Li (이청용)**  
-Assistant Professor, Division of Computer Engineering, Hansung University  
-Email: [leecy@hansung.ac.kr](mailto:leecy@hansung.ac.kr)
+**Seonu Park**  
+Ph.D. Student, Department of Big Data Analytics  
+Kyung Hee University  
+Email: sunu0087@khu.ac.kr
 
-_Last updated: **January 2026**_
+**Qinglong Li**  
+Assistant Professor, Division of Computer Engineering  
+Hansung University  
+Email: leecy@hansung.ac.kr
+
+_Last updated: March 2026_
