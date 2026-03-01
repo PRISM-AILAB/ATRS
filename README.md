@@ -33,7 +33,7 @@ Below is the project structure for quick reference.
 ```bash
 ├── data/                        # Dataset directory
 │   ├── raw/                     # Original (unprocessed) datasets
-│   └── processed/               # Preprocessed data for training/evaluation
+│   └── processed/               # Preprocessed data for training and evaluation
 │
 ├── model/                       # Model definitions and checkpoints
 │   └── proposed.py              # ATRS model architecture and training utilities
