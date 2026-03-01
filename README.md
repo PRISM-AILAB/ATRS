@@ -93,11 +93,13 @@ pip install -r requirements.txt
 ### Data Preparation
 Place your dataset under `data/raw/` and ensure that its format matches the preprocessing pipeline defined in `src/data.py`.
 
+Preprocessed data will be stored under `data/processed/` after feature extraction.
+
 ### Configuration
-Edit `src/config.yaml` to set training, data, and model hyperparameters before running.
+Edit `src/config.yaml` to configure training, data paths, and model hyperparameters before running the experiment.
 
 ### Train and Evaluate the Model
-Run the training script:
+Run the training and evaluation script:
 ```bash
 python main.py
 ```
@@ -175,7 +177,7 @@ The results demonstrate that ATRS consistently outperforms representative baseli
         <td>0.855</td><td>1.174</td><td>1.084</td><td>33.923</td>
       </tr>
       <tr>
-        <td><b>Proposed (ATRS)</b></td>
+        <td><b>ATRS (Proposed)</b></td>
         <td><b>0.640</b></td><td><b>0.933</b></td><td><b>0.966</b></td><td><b>26.638</b></td>
         <td><b>0.646</b></td><td><b>0.970</b></td><td><b>0.985</b></td><td><b>27.537</b></td>
         <td><b>0.832</b></td><td><b>1.163</b></td><td><b>1.078</b></td><td><b>34.917</b></td>
