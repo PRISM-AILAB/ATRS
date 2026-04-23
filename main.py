@@ -1,152 +1,57 @@
 import os
-import pickle
-import numpy as np
+
 import torch
 from sklearn.model_selection import train_test_split
 
-from src.path import PROCESSED_PATH, SAVE_MODEL_PATH, UTILS_PATH
+from src.path import PROCESSED_PATH, SAVE_MODEL_PATH, UTILS_PATH, ATE_RESULT_PATH
 from src.utils import load_yaml, load_parquet, set_seed, get_metrics
-
-# Updated imports for PyTorch
-from src.data import DataLoader
-from model.proposed import (
-    ProposedModel,
-    get_data_loader,
-    proposed_trainer,
-    proposed_tester,
-)
-
-def _load_pickles(fname: str):
-    artifacts_path = os.path.join(PROCESSED_PATH, f"{fname}_w2v_artifacts.pkl")
-    seqs_path = os.path.join(PROCESSED_PATH, f"{fname}_seqs.pkl")
-
-    if not (os.path.exists(artifacts_path) and os.path.exists(seqs_path)):
-        raise FileNotFoundError(
-            f"Processed pickle not found:\n- {artifacts_path}\n- {seqs_path}"
-        )
-
-    with open(artifacts_path, "rb") as f:
-        artifacts = pickle.load(f)
-    with open(seqs_path, "rb") as f:
-        seqs = pickle.load(f)
-
-    return artifacts, seqs
+from src.pipeline import DataProcessor, W2VArtifacts, get_data_loader, load_processed_data
+from model.proposed import ProposedModel, proposed_trainer, proposed_tester
 
 
-if __name__ == "__main__":
-    # 1) Load Config
-    CONFIG_FPATH = os.path.join(UTILS_PATH, "config.yaml")
-    cfg = load_yaml(CONFIG_FPATH)
+def split_train_val_test(seqs: dict, val_ratio: float, seed: int) -> dict:
+    """Carve a validation split out of the training arrays and bundle all three splits."""
+    (
+        user_id_train, user_id_val,
+        item_id_train, item_id_val,
+        user_seq_train, user_seq_val,
+        item_seq_train, item_seq_val,
+        y_train, y_val,
+    ) = train_test_split(
+        seqs["user_id_train"], seqs["item_id_train"],
+        seqs["user_seq_train"], seqs["item_seq_train"],
+        seqs["y_train"],
+        test_size=val_ratio, random_state=seed,
+    )
+    return {
+        "train": (user_id_train, item_id_train, user_seq_train, item_seq_train, y_train),
+        "val":   (user_id_val,   item_id_val,   user_seq_val,   item_seq_val,   y_val),
+        "test":  (seqs["user_id_test"], seqs["item_id_test"],
+                  seqs["user_seq_test"], seqs["item_seq_test"], seqs["y_test"]),
+    }
 
-    dargs = cfg.get("data", {})
-    args = cfg.get("args", {})
 
-    FNAME = dargs.get("fname")
-    args["fname"] = FNAME
-
-    seed = cfg.get("seed", 42)
-    set_seed(seed)
-    
-    # Check Device (GPU/CPU)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[main] Device: {device}")
-
-    os.makedirs(SAVE_MODEL_PATH, exist_ok=True)
-
-    # 2) Check if Processed Data Exists
-    train_path = os.path.join(PROCESSED_PATH, f"{FNAME}_train.parquet")
-    test_path = os.path.join(PROCESSED_PATH, f"{FNAME}_test.parquet")
-
-    need_processing = not (os.path.exists(train_path) and os.path.exists(test_path))
-
-    if need_processing:
-        print("[main] Processed parquet not found. Running DataLoader...")
-        # Note: 'max_words' and 'maxlen' removed as they are now dynamic
-        _ = DataLoader(
-            fname=FNAME,
-            raw_ext=dargs.get("raw_ext", "json.gz"),
-            test_size=dargs.get("test_size", 0.2),
-            random_state=seed,
-            
-            run_ate=dargs.get("run_ate", True),
-            text_col=dargs.get("text_col", "clean_text"),
-            aspect_col=dargs.get("aspect_col", "aspect"),
-            ate_result_dir=dargs.get("ate_result_dir", "output_results"),
-            ate_device=dargs.get("ate_device", "cuda:0"),
-            
-            user_aspect_col=dargs.get("user_aspect_col", "user_aspect_set"),
-            item_aspect_col=dargs.get("item_aspect_col", "item_aspect_set"),
-            agg_unique=dargs.get("agg_unique", True),
-            
-            # W2V params can be passed here if needed
-        )
-    else:
-        print("[main] Found processed parquet. Skipping raw processing.")
-
-    # 3) Load Data (For verification/logging)
-    train_df = load_parquet(train_path)
-    test_df = load_parquet(test_path)
-
-    print("[main] Train shape:", train_df.shape)
-    print("[main] Test shape :", test_df.shape)
-
-    # 4) Load Artifacts & Sequences
-    artifacts, seqs = _load_pickles(FNAME)
-    
-    # --- Validation Split ---
-    val_ratio = args.get("val_ratio", 0.125)
-
-    u_tr = seqs["user_id_train"]
-    i_tr = seqs["item_id_train"]
-    us_tr = seqs["user_train_seq"]
-    it_tr = seqs["item_train_seq"]
-    y_tr = seqs["y_train"]
-
-    u_tr, u_val, i_tr, i_val, us_tr, us_val, it_tr, it_val, y_tr, y_val = train_test_split(
-        u_tr, i_tr, us_tr, it_tr, y_tr,
-        test_size=val_ratio,
-        random_state=seed,
+def build_loaders(splits: dict, args: dict):
+    """Wrap each split tuple in a torch DataLoader."""
+    return (
+        get_data_loader(args, *splits["train"], shuffle=True),
+        get_data_loader(args, *splits["val"], shuffle=False),
+        get_data_loader(args, *splits["test"], shuffle=False),
     )
 
-    # Test Arrays
-    u_te = seqs["user_id_test"]
-    i_te = seqs["item_id_test"]
-    us_te = seqs["user_test_seq"]
-    it_te = seqs["item_test_seq"]
-    y_te = seqs["y_test"]
 
-    # 5) Create PyTorch DataLoaders
-    train_loader = get_data_loader(args, u_tr, i_tr, us_tr, it_tr, y_tr, shuffle=True)
-    val_loader = get_data_loader(args, u_val, i_val, us_val, it_val, y_val, shuffle=False)
-    test_loader = get_data_loader(args, u_te, i_te, us_te, it_te, y_te, shuffle=False)
-
-    # 6) Build Model (ProposedModel)
-    print("[main] Building PyTorch Model...")
-    
-    # Retrieve dynamic stats from artifacts
-    # Note: Using new attribute names from data.py
-    vocab_size = artifacts.aspect_vocab_size
-    user_maxlen = artifacts.user_aspect_len
-    item_maxlen = artifacts.item_aspect_len
-    
-    print(f"   - Aspect Vocab Size: {vocab_size}")
-    print(f"   - User Max Len: {user_maxlen}")
-    print(f"   - Item Max Len: {item_maxlen}")
-
-    model = ProposedModel(
-        num_users=len(artifacts.user_encoder.classes_),
-        num_items=len(artifacts.item_encoder.classes_),
-        
-        user_vocab_size=vocab_size,
-        item_vocab_size=vocab_size, # Shared vocab
-        
-        user_maxlen=user_maxlen,
-        item_maxlen=item_maxlen,
-        
+def build_model(artifacts: W2VArtifacts, args: dict) -> ProposedModel:
+    """Instantiate `ProposedModel` from the persisted artifacts and config args."""
+    return ProposedModel(
+        num_users=artifacts.num_users,
+        num_items=artifacts.num_items,
+        user_vocab_size=artifacts.user_vocab_size,
+        item_vocab_size=artifacts.item_vocab_size,
+        user_aspect_maxlen=artifacts.user_aspect_maxlen,
+        item_aspect_maxlen=artifacts.item_aspect_maxlen,
         user_embedding_matrix=artifacts.user_embedding_matrix,
         item_embedding_matrix=artifacts.item_embedding_matrix,
-        
-        num_heads=args.get("num_heads", 8),
+        num_heads=args.get("num_heads", 12),
         id_dim=args.get("id_dim", 128),
         dropout=args.get("dropout", 0.1),
         cnn_filters=args.get("cnn_filters", 100),
@@ -154,32 +59,70 @@ if __name__ == "__main__":
         ffn_dim=args.get("ffn_dim", 2048),
     )
 
-    # 7) Training
-    # Change extension from .keras to .pth for PyTorch
-    best_model_path = os.path.join(SAVE_MODEL_PATH, f"{FNAME}_Best_Model.pth")
 
+def run_data_processing(dargs: dict, args: dict, seed: int, fname: str):
+    """Invoke the DataProcessor pipeline (internal caches decide what to skip)."""
+    DataProcessor(
+        fname=fname,
+        raw_ext=dargs.get("raw_ext", "json.gz"),
+        test_size=dargs.get("test_size", 0.2),
+        random_state=seed,
+        clean_text_col=dargs.get("clean_text_col", "clean_text"),
+        aspect_col=dargs.get("aspect_col", "aspect"),
+        ate_result_dir=dargs.get("ate_result_dir", ATE_RESULT_PATH),
+        ate_device=dargs.get("ate_device", "cuda:0"),
+        user_aspect_col=dargs.get("user_aspect_col", "user_aspect_set"),
+        item_aspect_col=dargs.get("item_aspect_col", "item_aspect_set"),
+        aspect_length_percentile=dargs.get("aspect_length_percentile", 90),
+        w2v_vector_size=args.get("w2v_vector_size", 300),
+        w2v_window=args.get("w2v_window", 5),
+        w2v_min_count=args.get("w2v_min_count", 1),
+    ).run()
+
+
+def main():
+    cfg = load_yaml(os.path.join(UTILS_PATH, "config.yaml"))
+    dargs = cfg.get("data", {})
+    args = cfg.get("args", {})
+    fname = dargs.get("fname")
+    args["fname"] = fname
+
+    seed = cfg.get("seed", 42)
+    set_seed(seed)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[main] Device: {device}")
+
+    run_data_processing(dargs, args, seed, fname)
+
+    dataset_dir = os.path.join(PROCESSED_PATH, fname)
+    train_df = load_parquet(os.path.join(dataset_dir, "train.parquet"))
+    test_df = load_parquet(os.path.join(dataset_dir, "test.parquet"))
+    print("[main] Train shape:", train_df.shape)
+    print("[main] Test shape :", test_df.shape)
+
+    artifacts, seqs = load_processed_data(fname)
+    splits = split_train_val_test(seqs, args.get("val_ratio", 0.125), seed)
+    train_loader, val_loader, test_loader = build_loaders(splits, args)
+
+    print("[main] Building PyTorch Model...")
+    print(f"   - User Vocab Size: {artifacts.user_vocab_size} / Item Vocab Size: {artifacts.item_vocab_size}")
+    print(f"   - User Max Len:    {artifacts.user_aspect_maxlen} / Item Max Len:    {artifacts.item_aspect_maxlen}")
+
+    model = build_model(artifacts, args)
+    save_dir = os.path.join(SAVE_MODEL_PATH, fname)
+    os.makedirs(save_dir, exist_ok=True)
+    best_model_path = os.path.join(save_dir, "best.pth")
     model = proposed_trainer(
-        args={
-            **args,
-            "num_epochs": args.get("num_epochs", 100),
-            "patience": args.get("patience", 5),
-            "lr": args.get("lr", 1e-3),
-        },
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        best_model_path=best_model_path,
-        device=device
+        args=args, model=model,
+        train_loader=train_loader, val_loader=val_loader,
+        best_model_path=best_model_path, device=device,
     )
 
-    # 8) Testing
-    # The trainer returns the model with best weights loaded, so we can test directly
-    test_preds, test_trues = proposed_tester(
-        args=args,
-        model=model,
-        test_loader=test_loader,
-        device=device
-    )
-
+    test_preds, test_trues = proposed_tester(model, test_loader, device=device)
     mse, rmse, mae, mape = get_metrics(test_preds, test_trues)
-    print(f"[TEST] RMSE={rmse:.5f}  MSE={mse:.5f}  MAE={mae:.5f}  MAPE={mape:.3f}%")
+    print(f"[TEST] RMSE={rmse:.4f}  MSE={mse:.4f}  MAE={mae:.4f}  MAPE={mape:.3f}%")
+
+
+if __name__ == "__main__":
+    main()

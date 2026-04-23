@@ -1,36 +1,38 @@
 seed: 42
 
 data:
-  # Dataset identifier (used for file naming: data/processed/{fname}...)
   fname: Video_Games
-
-  # Raw file extension (e.g., 'json.gz', 'jsonl.gz', 'parquet')
-  # Note: Magazine data was 'jsonl.gz'
   raw_ext: jsonl.gz
 
-  # Aspect Term Extraction (ATE) settings
-  run_ate: true
-  text_col: clean_text       # Column containing cleaned text
-  aspect_col: aspect         # Column to store/read extracted aspects
+  clean_text_col: clean_text
+  aspect_col: aspect
 
-  # Data Split settings
-  test_size: 0.2             # 20% of total data used for testing
+  test_size: 0.2
+
+  # Aspect sequence length cap.
+  # Value is the p-th percentile of the per-user / per-item aspect-count
+  # distribution. Paper's best settings: Musical 90, Video Games 100, Yelp 75.
+  aspect_length_percentile: 90
 
 args:
-  # Hardware / System
-  device: cuda               # 'cuda' or 'cpu'
+  device: cuda
 
-  # Training Hyperparameters
+  # Training
   batch_size: 128
   num_epochs: 100
-  lr: 0.001                  # Learning Rate
-  dropout: 0.1               # Dropout rate
-  patience: 5                # Early stopping patience (stop if val_loss doesn't improve)
-  val_ratio: 0.125           # Proportion of training set to use for validation
+  lr: 0.001
+  dropout: 0.1
+  patience: 5
+  val_ratio: 0.125
 
-  # Model Architecture (Hyperparameters for ProposedModel)
-  id_dim: 128                # Dimension for User/Item ID Embeddings
-  num_heads: 8               # Number of Self-Attention Heads (Must divide id_dim)
-  cnn_filters: 100           # Number of filters in CNN layer
-  cnn_kernel_size: 5         # Kernel size for CNN (window size)
-  ffn_dim: 2048              # Dimension of Feed-Forward Network in Attention Block
+  # Model architecture
+  id_dim: 128
+  num_heads: 12
+  cnn_filters: 100
+  cnn_kernel_size: 5
+  ffn_dim: 2048
+
+  # Word2Vec
+  w2v_vector_size: 300
+  w2v_window: 5
+  w2v_min_count: 1

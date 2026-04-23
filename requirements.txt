@@ -13,5 +13,7 @@ tokenizers==0.13.3
 pyabsa==2.4.3
 nltk>=3.9.0
 seqeval>=1.2.0
+beautifulsoup4>=4.12.0
+contractions>=0.1.73
 
 termcolor>=2.0.0

@@ -1,75 +1,82 @@
+from typing import Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from typing import Tuple, Dict
+from torch.utils.data import DataLoader
 
-# ============================================================
-# 0) Blocks
-# ============================================================
+from src.utils import get_metrics
 
-class PointWiseFFN(nn.Module):
-    def __init__(self, d_model: int, dff: int):
+
+# ---- Sub-modules ---------------------------------------------------------
+
+class AspectEncoder(nn.Module):
+    """Aspect-term encoder: W2V → Conv1d → max-pool → projection."""
+
+    def __init__(self, embedding_matrix: np.ndarray, cnn_filters: int,
+                 kernel_size: int, out_dim: int, dropout: float):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_model, dff),
-            nn.ReLU(),
-            nn.Linear(dff, d_model)
+        emb_dim = embedding_matrix.shape[1]
+        self.word_embedding = nn.Embedding.from_pretrained(
+            torch.FloatTensor(embedding_matrix), freeze=True, padding_idx=0
         )
+        self.conv1d = nn.Conv1d(emb_dim, cnn_filters, kernel_size=kernel_size)
+        self.projection = nn.Linear(cnn_filters, out_dim)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, seq: torch.Tensor) -> torch.Tensor:
+        x = self.word_embedding(seq).permute(0, 2, 1)
+        x = F.relu(self.conv1d(x))
+        x = F.adaptive_max_pool1d(x, 1).squeeze(2)
+        return self.dropout(self.projection(x))
 
 
 class SelfAttentionBlock(nn.Module):
-    """
-    Transformer-style self-attention block:
-    MHA -> Add&Norm -> FFN -> Add&Norm
-    """
-    def __init__(self, num_heads: int, key_dim: int, dff: int, dropout_rate: float = 0.1):
+    """Multi-head self-attention + residual FFN (Eqs 5–10)."""
+
+    def __init__(self, embed_dim: int, num_heads: int, ffn_dim: int, dropout: float):
         super().__init__()
-        # PyTorch MultiheadAttention expects embed_dim. 
-        # In the TF code, key_dim was passed. Assuming embed_dim = key_dim here based on TF logic.
-        self.mha = nn.MultiheadAttention(embed_dim=key_dim, num_heads=num_heads, batch_first=True)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.ln1 = nn.LayerNorm(key_dim)
-        self.ln2 = nn.LayerNorm(key_dim)
-        self.ffn = PointWiseFFN(key_dim, dff)
-        self.dropout_ffn = nn.Dropout(dropout_rate)
+        if embed_dim % num_heads != 0:
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads}).")
 
-    def forward(self, x):
-        # x: (B, SeqLen, Dim)
-        
-        # Self Attention
-        attn_output, _ = self.mha(x, x, x)
-        attn_output = self.dropout(attn_output)
-        out1 = self.ln1(x + attn_output)
+        self.multihead_attention = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True,
+        )
+        self.attention_dropout = nn.Dropout(dropout)
+        self.layer_norm_1 = nn.LayerNorm(embed_dim)
 
-        # FFN
-        ffn_output = self.ffn(out1)
-        ffn_output = self.dropout_ffn(ffn_output)
-        out2 = self.ln2(out1 + ffn_output)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(embed_dim, ffn_dim),
+            nn.ReLU(),
+            nn.Linear(ffn_dim, embed_dim),
+        )
+        self.ffn_dropout = nn.Dropout(dropout)
+        self.layer_norm_2 = nn.LayerNorm(embed_dim)
 
-        return out2
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn, _ = self.multihead_attention(x, x, x)                     # Eq (7) / (8)
+        out1 = self.layer_norm_1(x + self.attention_dropout(attn))
+        ff = self.feed_forward(out1)
+        return self.layer_norm_2(out1 + self.ffn_dropout(ff))            # Eq (9) / (10)
 
 
-# ============================================================
-# 1) Proposed Model
-# ============================================================
+# ---- ATRS model ----------------------------------------------------------
 
 class ProposedModel(nn.Module):
+    """ATRS — Aspect Term-aware Recommender System (paper Sec 3)."""
+
     def __init__(
         self,
         num_users: int,
         num_items: int,
         user_vocab_size: int,
         item_vocab_size: int,
-        user_maxlen: int,
-        item_maxlen: int,
+        user_aspect_maxlen: int,
+        item_aspect_maxlen: int,
         user_embedding_matrix: np.ndarray,
         item_embedding_matrix: np.ndarray,
-        num_heads: int = 8,
+        num_heads: int = 12,
         id_dim: int = 128,
         dropout: float = 0.1,
         cnn_filters: int = 100,
@@ -78,166 +85,116 @@ class ProposedModel(nn.Module):
     ):
         super().__init__()
 
-        # --- User Text Branch ---
-        self.user_text_emb = nn.Embedding.from_pretrained(
-            torch.FloatTensor(user_embedding_matrix), freeze=True, padding_idx=0
-        )
-        self.user_cnn = nn.Conv1d(
-            in_channels=user_embedding_matrix.shape[1], 
-            out_channels=cnn_filters, 
-            kernel_size=cnn_kernel_size
-        )
-        self.user_aspect_proj = nn.Linear(cnn_filters, id_dim)
-        self.user_aspect_dropout = nn.Dropout(dropout)
+        head_dim = max(1, id_dim // num_heads)
+        self.attn_dim = head_dim * num_heads
 
-        # --- User ID Branch ---
-        self.user_id_emb = nn.Embedding(num_users, id_dim)
+        if user_embedding_matrix.shape[0] != user_vocab_size:
+            raise ValueError(
+                f"user_embedding_matrix rows ({user_embedding_matrix.shape[0]}) != user_vocab_size ({user_vocab_size})."
+            )
+        if item_embedding_matrix.shape[0] != item_vocab_size:
+            raise ValueError(
+                f"item_embedding_matrix rows ({item_embedding_matrix.shape[0]}) != item_vocab_size ({item_vocab_size})."
+            )
 
-        # --- Item Text Branch ---
-        self.item_text_emb = nn.Embedding.from_pretrained(
-            torch.FloatTensor(item_embedding_matrix), freeze=True, padding_idx=0
-        )
-        self.item_cnn = nn.Conv1d(
-            in_channels=item_embedding_matrix.shape[1], 
-            out_channels=cnn_filters, 
-            kernel_size=cnn_kernel_size
-        )
-        self.item_aspect_proj = nn.Linear(cnn_filters, id_dim)
-        self.item_aspect_dropout = nn.Dropout(dropout)
+        self.num_users = num_users
+        self.num_items = num_items
+        self.user_vocab_size = user_vocab_size
+        self.item_vocab_size = item_vocab_size
+        self.user_aspect_maxlen = user_aspect_maxlen
+        self.item_aspect_maxlen = item_aspect_maxlen
+        self.id_dim = id_dim
+        self.num_heads = num_heads
 
-        # --- Item ID Branch ---
-        self.item_id_emb = nn.Embedding(num_items, id_dim)
+        self.user_aspect_encoder = AspectEncoder(user_embedding_matrix, cnn_filters, cnn_kernel_size, id_dim, dropout)
+        self.item_aspect_encoder = AspectEncoder(item_embedding_matrix, cnn_filters, cnn_kernel_size, id_dim, dropout)
 
-        # --- Projection for Attention ---
-        # Logic from TF: Concatenate (Aspect, ID) -> Linear -> Attention
-        concat_dim = id_dim * 2 
-        
-        if id_dim % num_heads != 0:
-            raise ValueError(f"id_dim ({id_dim}) must be divisible by num_heads ({num_heads}).")
-        
-        # In TF code, it projected to key_dim (id_dim // num_heads). 
-        # CAUTION: Standard Transformer preserves dim. TF code reduced it. 
-        # We follow TF logic: output dim = id_dim // num_heads.
-        self.key_dim = id_dim // num_heads
+        # Eqs (1)–(2)
+        self.user_id_embedding = nn.Embedding(num_users, id_dim)
+        self.item_id_embedding = nn.Embedding(num_items, id_dim)
 
-        self.user_project = nn.Linear(concat_dim, self.key_dim)
-        self.user_proj_dropout = nn.Dropout(dropout)
-        
-        self.item_project = nn.Linear(concat_dim, self.key_dim)
-        self.item_proj_dropout = nn.Dropout(dropout)
+        # Eqs (3)–(4)
+        self.user_project = nn.Linear(2 * id_dim, self.attn_dim)
+        self.item_project = nn.Linear(2 * id_dim, self.attn_dim)
 
-        # --- Shared Self Attention ---
-        self.sab = SelfAttentionBlock(
-            num_heads=num_heads, 
-            key_dim=self.key_dim, 
-            dff=ffn_dim, 
-            dropout_rate=dropout
-        )
+        # Eqs (5)–(10)
+        self.user_self_attention = SelfAttentionBlock(self.attn_dim, num_heads, ffn_dim, dropout)
+        self.item_self_attention = SelfAttentionBlock(self.attn_dim, num_heads, ffn_dim, dropout)
 
-        # --- MLP ---
-        # Input to MLP is Concat(User_Attn_Out, Item_Attn_Out)
-        mlp_input_dim = self.key_dim * 2
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(mlp_input_dim, 128),
+        # Eqs (11)–(12): MLP rating predictor
+        self.rating_predictor = nn.Sequential(
+            nn.Linear(2 * self.attn_dim, 128),
+            nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(128, 64),
+            nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, 1),
-            nn.ReLU() # TF used ReLU output
         )
 
-    def forward(self, user_id, item_id, user_seq, item_seq):
-        # 1) User Text Branch
-        u_txt = self.user_text_emb(user_seq)  # (B, L, Emb)
-        u_txt = u_txt.permute(0, 2, 1)        # (B, Emb, L) for Conv1d
-        u_txt = F.relu(self.user_cnn(u_txt))  # (B, Filters, L_new)
-        # Global Max Pooling
-        u_txt = F.adaptive_max_pool1d(u_txt, 1).squeeze(2) # (B, Filters)
-        u_txt = self.user_aspect_proj(u_txt)
-        u_txt = self.user_aspect_dropout(u_txt)
+    def forward(
+        self,
+        user_id: torch.Tensor,
+        item_id: torch.Tensor,
+        user_seq: torch.Tensor,
+        item_seq: torch.Tensor,
+    ) -> torch.Tensor:
+        at_u = self.user_aspect_encoder(user_seq)
+        e_u = self.user_id_embedding(user_id)                                  # Eq (2)
+        z_u = self.user_project(torch.cat([at_u, e_u], dim=-1)).unsqueeze(1)   # Eq (3)
+        F_u = self.user_self_attention(z_u).squeeze(1)                         # Eqs (7), (9)
 
-        # 2) User ID Branch
-        u_id = self.user_id_emb(user_id).squeeze(1) # (B, ID_Dim)
+        at_v = self.item_aspect_encoder(item_seq)
+        e_v = self.item_id_embedding(item_id)                                  # Eq (1)
+        z_v = self.item_project(torch.cat([at_v, e_v], dim=-1)).unsqueeze(1)   # Eq (4)
+        F_v = self.item_self_attention(z_v).squeeze(1)                         # Eqs (8), (10)
 
-        # 3) Item Text Branch
-        i_txt = self.item_text_emb(item_seq)  # (B, L, Emb)
-        i_txt = i_txt.permute(0, 2, 1)        # (B, Emb, L)
-        i_txt = F.relu(self.item_cnn(i_txt))
-        i_txt = F.adaptive_max_pool1d(i_txt, 1).squeeze(2)
-        i_txt = self.item_aspect_proj(i_txt)
-        i_txt = self.item_aspect_dropout(i_txt)
-
-        # 4) Item ID Branch
-        i_id = self.item_id_emb(item_id).squeeze(1) # (B, ID_Dim)
-
-        # 5) Concatenate & Project
-        u_vec = torch.cat([u_txt, u_id], dim=1)
-        i_vec = torch.cat([i_txt, i_id], dim=1)
-
-        u_vec = self.user_proj_dropout(self.user_project(u_vec))
-        i_vec = self.item_proj_dropout(self.item_project(i_vec))
-
-        # 6) Self Attention
-        # Expand dims to (B, 1, D) for Attention
-        u_vec = u_vec.unsqueeze(1)
-        i_vec = i_vec.unsqueeze(1)
-
-        u_att = self.sab(u_vec)
-        i_att = self.sab(i_vec)
-
-        # Flatten
-        u_att = u_att.view(u_att.size(0), -1)
-        i_att = i_att.view(i_att.size(0), -1)
-
-        # 7) Final Fusion & Output
-        final_vec = torch.cat([u_att, i_att], dim=1)
-        output = self.mlp(final_vec)
-        
-        return output
+        O = torch.cat([F_u, F_v], dim=1)                                       # Eq (11)
+        return self.rating_predictor(O)                                        # Eq (12)
 
 
-# ============================================================
-# 2) Dataset & DataLoader
-# ============================================================
+# ---- Training / evaluation helpers ---------------------------------------
 
-class RecommenderDataset(Dataset):
-    def __init__(self, user_ids, item_ids, user_seq, item_seq, labels):
-        self.user_ids = user_ids
-        self.item_ids = item_ids
-        self.user_seq = user_seq
-        self.item_seq = item_seq
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        return {
-            "user_id": torch.tensor(self.user_ids[idx], dtype=torch.long),
-            "item_id": torch.tensor(self.item_ids[idx], dtype=torch.long),
-            "user_seq": torch.tensor(self.user_seq[idx], dtype=torch.long),
-            "item_seq": torch.tensor(self.item_seq[idx], dtype=torch.long),
-            "label": torch.tensor(self.labels[idx], dtype=torch.float32)
-        }
-
-def get_data_loader(
-    args: dict,
-    user_ids: np.ndarray,
-    item_ids: np.ndarray,
-    user_seq: np.ndarray,
-    item_seq: np.ndarray,
-    labels: np.ndarray,
-    shuffle: bool = True,
-):
-    dataset = RecommenderDataset(user_ids, item_ids, user_seq, item_seq, labels)
-    batch_size = args.get("batch_size", 128)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
+def _unpack_batch(batch: dict, device: str):
+    """Move batch tensors to `device`."""
+    return (
+        batch["user_id"].to(device),
+        batch["item_id"].to(device),
+        batch["user_seq"].to(device),
+        batch["item_seq"].to(device),
+        batch["label"].to(device),
+    )
 
 
-# ============================================================
-# 3) Trainer & Tester
-# ============================================================
+def _train_one_epoch(model: nn.Module, loader: DataLoader,
+                     optimizer: torch.optim.Optimizer, criterion: nn.Module,
+                     device: str) -> float:
+    """One training epoch; returns average batch loss."""
+    model.train()
+    total_loss = 0.0
+    for batch in loader:
+        uid, iid, useq, iseq, label = _unpack_batch(batch, device)
+        optimizer.zero_grad()
+        loss = criterion(model(uid, iid, useq, iseq), label.unsqueeze(1))
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(loader)
+
+
+def _predict(model: nn.Module, loader: DataLoader, device: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Run inference; return concatenated (preds, trues) arrays."""
+    model.eval()
+    preds, trues = [], []
+    with torch.no_grad():
+        for batch in loader:
+            uid, iid, useq, iseq, label = _unpack_batch(batch, device)
+            preds.append(model(uid, iid, useq, iseq).cpu().numpy().flatten())
+            trues.append(label.cpu().numpy().flatten())
+    return np.concatenate(preds), np.concatenate(trues)
+
+
+# ---- Public trainer / tester ---------------------------------------------
 
 def proposed_trainer(
     args: dict,
@@ -245,64 +202,28 @@ def proposed_trainer(
     train_loader: DataLoader,
     val_loader: DataLoader,
     best_model_path: str,
-    device: str = "cuda"
-):
+    device: str = "cuda",
+) -> nn.Module:
+    """Adam + MSE (Eq 14) with early-stopping; returns model reloaded from best checkpoint."""
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.get("lr", 0.001))
     criterion = nn.MSELoss()
-
     epochs = args.get("num_epochs", 100)
     patience = args.get("patience", 5)
-    
-    best_val_loss = float("inf")
+
+    best_val_mse = float("inf")
     patience_counter = 0
 
     print(f"Start Training on {device}...")
-
     for epoch in range(epochs):
-        # --- Training ---
-        model.train()
-        train_loss = 0.0
-        for batch in train_loader:
-            optimizer.zero_grad()
-            
-            uid = batch["user_id"].to(device)
-            iid = batch["item_id"].to(device)
-            useq = batch["user_seq"].to(device)
-            iseq = batch["item_seq"].to(device)
-            label = batch["label"].to(device).unsqueeze(1) # (B, 1)
+        train_loss = _train_one_epoch(model, train_loader, optimizer, criterion, device)
+        val_preds, val_trues = _predict(model, val_loader, device)
+        val_mse, val_rmse, val_mae, _ = get_metrics(val_preds, val_trues)
+        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f} | "
+              f"Val MSE={val_mse:.4f}  MAE={val_mae:.4f}  RMSE={val_rmse:.4f}")
 
-            pred = model(uid, iid, useq, iseq)
-            loss = criterion(pred, label)
-            
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-
-        avg_train_loss = train_loss / len(train_loader)
-
-        # --- Validation ---
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                uid = batch["user_id"].to(device)
-                iid = batch["item_id"].to(device)
-                useq = batch["user_seq"].to(device)
-                iseq = batch["item_seq"].to(device)
-                label = batch["label"].to(device).unsqueeze(1)
-
-                pred = model(uid, iid, useq, iseq)
-                loss = criterion(pred, label)
-                val_loss += loss.item()
-        
-        avg_val_loss = val_loss / len(val_loader)
-
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-
-        # --- Early Stopping ---
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if val_mse < best_val_mse:
+            best_val_mse = val_mse
             patience_counter = 0
             torch.save(model.state_dict(), best_model_path)
             print("  -> Saved Best Model")
@@ -312,34 +233,12 @@ def proposed_trainer(
                 print("  -> Early Stopping Triggered")
                 break
 
-    # Load best weights
-    model.load_state_dict(torch.load(best_model_path))
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
     return model
 
 
-def proposed_tester(
-    args: dict,
-    model: nn.Module,
-    test_loader: DataLoader,
-    device: str = "cuda"
-) -> Tuple[np.ndarray, np.ndarray]:
+def proposed_tester(model: nn.Module, test_loader: DataLoader,
+                    device: str = "cuda") -> Tuple[np.ndarray, np.ndarray]:
+    """Run inference on test loader; return (preds, trues)."""
     model.to(device)
-    model.eval()
-    
-    preds_list = []
-    trues_list = []
-
-    with torch.no_grad():
-        for batch in test_loader:
-            uid = batch["user_id"].to(device)
-            iid = batch["item_id"].to(device)
-            useq = batch["user_seq"].to(device)
-            iseq = batch["item_seq"].to(device)
-            label = batch["label"].to(device)
-
-            pred = model(uid, iid, useq, iseq)
-            
-            preds_list.append(pred.cpu().numpy().flatten())
-            trues_list.append(label.cpu().numpy().flatten())
-
-    return np.concatenate(preds_list), np.concatenate(trues_list)
+    return _predict(model, test_loader, device)
