@@ -1,196 +1,119 @@
 # ATRS
 
 Official implementation of:
-> Lim, H., Li, X., Park, S., Li, Q., & Kim, J. (2026). 
-**Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling**. 
-_Information Sciences_, 735, 123078.  [Paper](https://doi.org/10.1016/j.ins.2026.123078)
+> Lim, H., Li, X., Park, S., Li, Q., & Kim, J. (2026).
+**Reducing contextual noise in review-based recommendation via aspect term extraction and attention modeling**.
+_Information Sciences_, 735, 123078. [Paper](https://doi.org/10.1016/j.ins.2026.123078)
 
 ## Overview
-This repository provides the official implementation of ATRS (Aspect Term-aware Recommender System), a review-based recommendation model that enhances preference modeling by increasing the informational density of user reviews. ATRS addresses the limitation of existing methods that indiscriminately process entire reviews, where aspect-relevant content is often diluted by contextual noise. To mitigate this issue, ATRS employs a Transformer-based pretrained aspect term extraction (ATE) module to identify product-related terms and filter irrelevant information from reviews. The extracted aspect terms are then encoded using a convolutional neural network and aggregated through a self-attention mechanism to construct aspect-aware user and item representations. Experiments conducted on Amazon and Yelp datasets demonstrate that ATRS consistently outperforms representative baselines, achieving average improvements of 19.54% in MAE and 11.89% in RMSE. These results highlight the effectiveness of aspect-level refinement in review-based recommender systems.
+This repository is the official implementation of ATRS (Aspect Term-aware Recommender System), published in *Information Sciences* (2026).
 
-## Requirements
-- python>=3.9
-- torch>=2.5.1
-- torchvision>=0.20.1
-- numpy==1.26.4
-- pandas>=2.0.0
-- gensim==4.3.3
-- pyarrow>=12.0.0
-- scikit-learn>=1.5.0
-- tqdm>=4.66.0
-- PyYAML>=6.0.0
-- pyabsa==2.4.3
-- nltk>=3.9.0
+Most review-based recommendation models process entire review bodies indiscriminately, allowing aspect-relevant signal to be diluted by surrounding context. ATRS addresses this by routing review text through a dedicated **Aspect Term Extraction (ATE)** stage that filters out non-aspect content before downstream encoding.
 
-> `sentencepiece==0.2.1`, `transformers==4.29.2`, `tokenizers==0.13.3`, `seqeval>=1.2.0`, and `termcolor>=2.0.0` are pulled in automatically as transitive dependencies of `pyabsa==2.4.3` and do not need to be pinned separately.
+The retained aspect terms are encoded with a 1D-CNN over Word2Vec embeddings, fused with user/item ID embeddings, and passed through a self-attention block to form aspect-aware user and item representations. These are concatenated and forwarded to an MLP that predicts a continuous rating score as a regression target. Quantitative comparisons against representative recommendation baselines on Amazon and Yelp datasets are reported in [Experimental Results](#experimental-results).
 
 ## Repository Structure
-Below is the project structure for quick reference.
 
 ```bash
-├── data/                        # Dataset directory
-│   ├── raw/                     # Original (unprocessed) datasets
-│   └── processed/               # Preprocessed data for training and evaluation
+├── data/
+│   ├── raw/                        # Source datasets — place {fname}.{raw_ext} here
+│   ├── processed/                  # Pipeline parquet caches (preprocessed / aspects / w2v / train / test)
+│   ├── ate_output/                 # PyABSA workspace + extraction JSON
+│   │   └── .pyabsa/                # Contained pyabsa CWD: checkpoints/, checkpoints.json, result JSON
+│   └── ATRS Architecture.png
 │
-├── model/                       # Model definitions and checkpoints
-│   ├── proposed.py              # ATRS model architecture and training utilities
-│   └── save/                    # Best-model checkpoints (auto-created)
+├── model/
+│   ├── atrs.py                     # ATRS architecture, trainer, and predictor
+│   └── save/                       # Best checkpoint per dataset (best.pth)
 │
-├── src/                         # Core source code
-│   ├── pipeline.py              # End-to-end data processing pipeline
-│   ├── preprocessing.py         # Text cleaning and k-core filtering utilities
-│   ├── aspect_extraction.py     # Aspect term extraction module
-│   ├── config.yaml              # Model and training configuration file
-│   ├── path.py                  # Path and directory management utilities
-│   └── utils.py                 # Helper functions (data loading, metrics, etc.)
+├── src/
+│   ├── config.yaml                 # Single source of truth for all hyperparameters
+│   ├── data_processing.py          # DataProcessor pipeline + RecommenderDataset + DataLoader factory
+│   ├── aspect_extraction.py        # ATExtractor — PyABSA wrapper for aspect term extraction
+│   ├── preprocessing.py            # Review text cleaning + k-core filter
+│   ├── path.py                     # Project path constants (auto-creates runtime folders)
+│   └── utils.py                    # Metrics, parquet/yaml/seed helpers, gz loader
 │
-├── main.py                      # Entry point for model training and evaluation
-│
-├── requirements.txt             # Python package dependencies
-│
-├── README.md                    # Project documentation
-│
-└── .gitignore                   # Git ignore configuration
-
+├── main.py                         # Entry point: data preparation → train → test
+├── requirements.txt
+├── README.md
+└── .gitignore
 ```
 
 ## Model Description
 
-ATRS (Aspect Term-aware Recommender System) is a review-based recommendation model designed to reduce contextual noise and enhance preference modeling through aspect-level refinement of textual representations. Instead of processing entire reviews indiscriminately, ATRS explicitly focuses on item-relevant aspect information.
-
-The model consists of two main modules:
-- **ATE (Aspect Term Extraction) Module:** Identifies product-related aspect terms from review text.
-- **RS (Recommender System) Module:** Constructs aspect-aware user and item representations and predicts ratings.
-
-In the ATE module, a Transformer-based encoder processes tokenized review text to capture contextual semantics. A Local Context Focus (LCF) mechanism further refines token-level representations, and a BIO tagging scheme is applied to extract salient aspect terms.
-
-In the RS module, the extracted aspect terms are embedded using a convolutional neural network and integrated with user and item latent embeddings. A self-attention mechanism models the relative importance within each representation. The refined user and item representations are then combined and passed to a rating prediction network for final score estimation.
+ATRS consists of two sequential modules. The full architecture is illustrated below.
 
 <p align="center">
-  <img src="data/ATRS Architecture.png" alt="ATRS model Architecture" width="800">
+  <img src="data/ATRS Architecture.png" alt="ATRS Architecture" width="800">
 </p>
+
+### 1. Aspect Term Extraction Module
+A pretrained Transformer encoder (PyABSA's English ATE checkpoint, FAST-LCF-ATEPC over DeBERTa-v3-base) reads each cleaned review and emits BIO-tagged aspect terms. Per-row aspect lists are then aggregated into per-user and per-item aspect sets, which become the inputs to the RS module.
+
+Implementation: [`src/aspect_extraction.py`](src/aspect_extraction.py), invoked from [`src/data_processing.py`](src/data_processing.py).
+
+### 2. Recommender System Module
+Each user and item aspect set is tokenized over a Word2Vec-trained vocabulary, encoded by a 1D-CNN (`AspectEncoder`), and concatenated with a learned ID embedding. The fused vector is projected and passed through a multi-head self-attention + FFN block (`SelfAttentionBlock`, Eqs 5–10) to yield aspect-aware user (`F_u`) and item (`F_v`) representations. Their concatenation is fed to an MLP regressor that outputs the predicted rating (Eqs 11–12).
+
+Implementation: `AspectEncoder`, `SelfAttentionBlock`, `ATRS.regressor` in [`model/atrs.py`](model/atrs.py).
 
 ## How to Run
 
-### Environment Setup
-Create a virtual environment (Python ≥ 3.9 recommended) and install the required dependencies:
+### Configuration
+All hyperparameters live in [`src/config.yaml`](src/config.yaml) — it is the single source of truth. Defaults reproduce the paper experiments.
 
-#### Option A: Using venv
-```bash
-python3.9 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
+The `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` wheels in [`requirements.txt`](requirements.txt) target an RTX 3080 Ti (CUDA 12.1). **A CUDA-capable GPU is required** — `main.py` raises `RuntimeError` if no CUDA device is detected.
 
-#### Option B: Using Conda
+End-to-end run from a fresh checkout:
 ```bash
-conda create -n atrs python=3.9
+conda create -n atrs python=3.11
 conda activate atrs
 pip install -r requirements.txt
-```
-
-### Data Preparation
-Place your raw dataset under `data/raw/` as `<fname>.<raw_ext>` (e.g. `Video_Games.jsonl.gz`), matching the `fname` and `raw_ext` values set in [src/config.yaml](src/config.yaml). The default pipeline expects an Amazon-review-style gzipped JSON Lines file with the following columns:
-
-| Column | Type | Description |
-| --- | --- | --- |
-| `user_id` | string | Unique reviewer identifier |
-| `parent_asin` | string | Unique product identifier |
-| `text` | string | Raw review text (cleaned automatically via `preprocessing.clean_text`) |
-| `rating` | float | User's rating (1–5); prediction target |
-
-(Optional) An `aspect` column holding a list of pre-extracted aspect terms per row may be supplied to skip the PyABSA extraction stage.
-
-Cleaned splits, tokenizers, and Word2Vec embeddings are written under `data/processed/{fname}/` on the first run and reused on subsequent runs.
-
-### Configuration
-Edit `src/config.yaml` to configure training, data paths, and model hyperparameters before running the experiment.
-
-### Train and Evaluate the Model
-Run the training and evaluation script:
-```bash
 python main.py
 ```
 
-### Outputs
-The `DataProcessor` pipeline persists four cached artifacts plus the final model checkpoint. Each parquet / pickle is paired with a `.meta.json` sidecar recording the config signature used to produce it; on re-run, a cache is reused only if the current config matches, and any change cascades into downstream rebuilds.
+### Data Preparation
+Place the dataset as `data/raw/{fname}.{raw_ext}` where `{fname}` and `{raw_ext}` match `data.fname` / `data.raw_ext` in `config.yaml`.
 
-#### Stage 1 — Preprocessed parquet
-**Path:** `data/processed/{fname}/preprocessed.parquet`
-**Produced by:** text cleaning + 5-core filter on raw input
-**Added columns:**
+**Required columns in raw JSONL**:
+`user_id`, `parent_asin`, `text`, `rating`
+(an `aspect` column with pre-extracted terms is optional — if present, the ATE stage is skipped)
 
-| Column | Type | Description |
-| --- | --- | --- |
-| `clean_text` | string | HTML/URL-stripped, lowercased, contractions-expanded, stopwords-removed, lemmatized review body |
+The pipeline writes five cached artifacts under `data/processed/` plus the final model checkpoint. On re-run, any artifact already on disk is reused as-is — to invalidate, delete the file.
 
-Rows with empty `clean_text` are dropped; an iterative 5-core filter is then applied on `user_id` / `parent_asin` until convergence.
+**`{fname}_preprocessed.parquet`** — after text cleaning and k-core filter:
+raw columns + `clean_text` (HTML/URL-stripped, lowercased, contractions-expanded, stopwords-removed, lemmatized review body)
 
-#### Stage 2 — Aspect-set parquet
-**Path:** `data/processed/{fname}/aspects.parquet`
-**Produced by:** PyABSA aspect term extraction + per-user / per-item aggregation
-**Also saved:** `data/ate_output/{fname}/*.json` — raw PyABSA extraction JSON (intermediate, index-keyed)
-**Added columns:**
+**`{fname}_aspects.parquet`** — after PyABSA aspect extraction and per-user/item aggregation:
+preprocessed columns + `aspect` (per-row term list), `user_aspect_set` (flattened concatenation per user), `item_aspect_set` (flattened concatenation per item)
 
-| Column | Type | Description |
-| --- | --- | --- |
-| `aspect` | list[str] | Aspect terms extracted from `clean_text` by PyABSA |
-| `user_aspect_set` | list[str] | Flattened concatenation (no deduplication) of every `aspect` list belonging to the same `user_id` |
-| `item_aspect_set` | list[str] | Flattened concatenation (no deduplication) of every `aspect` list belonging to the same `parent_asin` |
+**`{fname}_w2v.pkl`** — pickled `W2VArtifacts` produced from train aspect sets:
+`user_tokenizer` / `item_tokenizer` (`SimpleTokenizer`), `user_embedding` / `item_embedding` (frozen float32 matrices), `user_vocab_size` / `item_vocab_size`, `user_aspect_maxlen` / `item_aspect_maxlen` (p-th percentile of train aspect-set sizes)
 
-Rows where either `user_aspect_set` or `item_aspect_set` is empty are dropped.
+**`{fname}_train.parquet`** / **`{fname}_test.parquet`** — final shuffle split:
+aspect columns + `user_idx` / `item_idx` (LabelEncoder ID mapping) + `user_seq` / `item_seq` (tokenized + zero-padded aspect sequences)
 
-#### Stage 3 — W2V artifact cache
-**Path:** `data/processed/{fname}/w2v_cache.pkl` (pickle)
-**Produced by:** `SimpleTokenizer` fit on train aspect sets + Word2Vec training (train split only) + aspect maxlen computation
-**Contents:**
+### Re-runs and caching
+On every call to `python main.py`, the pipeline auto-skips any cache layer already on disk (splits → aspects → preprocessed → raw). To force a stage to re-run, delete the corresponding parquet / pickle. Changing config values that affect upstream output (e.g. `k_core`, `aspect_length_percentile`, `w2v_*`, `random_state`) does **not** auto-invalidate — delete the affected caches manually before re-running.
 
-| Key | Type | Description |
-| --- | --- | --- |
-| `user_tokenizer`, `item_tokenizer` | `SimpleTokenizer` | `word_index` dict (0 = pad, 1 = OOV, 2+ = aspect vocabulary) |
-| `user_embedding`, `item_embedding` | `np.ndarray (vocab_size, w2v_vector_size)` | Frozen float32 embedding matrix; pad / OOV rows are zero |
-| `user_vocab_size`, `item_vocab_size` | int | `len(word_index) + 1` |
-| `user_aspect_maxlen`, `item_aspect_maxlen` | int | `aspect_length_percentile`-th percentile of per-user / per-item aspect set lengths on train |
-
-#### Stage 4 — Train / test parquet (final)
-**Paths:** `data/processed/{fname}/train.parquet`, `data/processed/{fname}/test.parquet`
-**Produced by:** `LabelEncoder` ID mapping + shuffle split (`test_size`) + tokenization + zero padding
-**Added columns:**
-
-| Column | Type | Description |
-| --- | --- | --- |
-| `user_idx` | int64 | `LabelEncoder`-mapped user id, range `[0, num_users)` |
-| `item_idx` | int64 | `LabelEncoder`-mapped item id, range `[0, num_items)` |
-| `user_seq` | list[int64] of length `user_aspect_maxlen` | `user_aspect_set` tokenized by `user_tokenizer`, truncated to the first `user_aspect_maxlen` tokens, right-padded with zeros |
-| `item_seq` | list[int64] of length `item_aspect_maxlen` | As above, using `item_aspect_set` and `item_tokenizer` |
-
-#### Model checkpoint
-**Path:** `model/save/{fname}/best.pth`
-State dict written whenever validation MSE improves during training.
-
----
-
-To force a rebuild of a specific stage, delete its parquet / pickle file (the `.meta.json` sidecar is recreated automatically on the next run). Changing any config value tracked by a stage's signature (e.g. `test_size`, `aspect_length_percentile`, `w2v_*`, `random_state`) invalidates that stage and all downstream caches. Per-epoch training loss and validation MSE / MAE / RMSE are printed to stdout, followed by final test RMSE / MSE / MAE / MAPE.
+PyABSA's `./checkpoints.json` and `./checkpoints/` directory are hardcoded CWD-relative inside the library; ATRS routes them under `data/ate_output/.pyabsa/` via a chdir context so they don't pollute the project root.
 
 ## Experimental Results
 
-ATRS was evaluated on three real-world review datasets: Musical Instruments, Video Games, and Yelp (Pennsylvania). 
+ATRS was evaluated on three real-world review datasets: Musical Instruments, Video Games, and Yelp (Pennsylvania).
 The results demonstrate that ATRS consistently outperforms representative baselines across all evaluation metrics, achieving average improvements of 19.54% in MAE and 11.89% in RMSE.
 
 <div align="center">
-  <table> 
-    <thead> 
+  <table>
+    <thead>
       <tr>
         <th rowspan="2">Model</th>
-        <th colspan="4">Musical Instruments</th> 
-        <th colspan="4">Video Games</th> 
-        <th colspan="4">Yelp</th> 
+        <th colspan="4">Musical Instruments</th>
+        <th colspan="4">Video Games</th>
+        <th colspan="4">Yelp</th>
       </tr>
-      <tr> 
-        <th>MAE</th> 
-        <th>MSE</th> 
-        <th>RMSE</th> 
-        <th>MAPE</th>
+      <tr>
         <th>MAE</th>
         <th>MSE</th>
         <th>RMSE</th>
@@ -199,14 +122,18 @@ The results demonstrate that ATRS consistently outperforms representative baseli
         <th>MSE</th>
         <th>RMSE</th>
         <th>MAPE</th>
+        <th>MAE</th>
+        <th>MSE</th>
+        <th>RMSE</th>
+        <th>MAPE</th>
       </tr>
-    </thead> 
-    <tbody> 
-      <tr> 
-        <td>PMF</td> 
-        <td>1.306</td><td>2.640</td><td>1.625</td><td>35.034</td> 
-        <td>1.220</td><td>2.407</td><td>1.551</td><td>33.948</td> 
-        <td>1.276</td><td>2.803</td><td>1.674</td><td>38.330</td> 
+    </thead>
+    <tbody>
+      <tr>
+        <td>PMF</td>
+        <td>1.306</td><td>2.640</td><td>1.625</td><td>35.034</td>
+        <td>1.220</td><td>2.407</td><td>1.551</td><td>33.948</td>
+        <td>1.276</td><td>2.803</td><td>1.674</td><td>38.330</td>
       </tr>
       <tr>
         <td>NCF</td>
@@ -253,7 +180,7 @@ The results demonstrate that ATRS consistently outperforms representative baseli
     </tbody>
   </table>
 </div>
-      
+
 ## Citation
 
 If you use this repository in your research, please cite:
@@ -266,22 +193,22 @@ If you use this repository in your research, please cite:
   volume = {735},
   pages = {123078},
   year = {2026},
-  doi = {10.1016/j.ins.2026.123078}  
+  doi = {10.1016/j.ins.2026.123078}
 }
 ```
 
 ## Contact
 
-For research inquiries or collaborations, please contact:  
+For research inquiries or collaborations, please contact:
 
-**Seonu Park**  
-Ph.D. Student, Department of Big Data Analytics  
-Kyung Hee University  
+**Seonu Park**
+Ph.D. Student, Department of Big Data Analytics
+Kyung Hee University
 Email: sunu0087@khu.ac.kr
 
-**Qinglong Li**  
-Assistant Professor, Division of Computer Engineering  
-Hansung University  
+**Qinglong Li**
+Assistant Professor, Division of Computer Engineering
+Hansung University
 Email: leecy@hansung.ac.kr
 
 _Last updated: April 2026_

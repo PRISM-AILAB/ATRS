@@ -1,16 +1,16 @@
-import os
-import re
 import html
+import re
+from typing import Optional
 
-import pandas as pd
-import nltk
 import contractions
+import nltk
+import pandas as pd
 from bs4 import BeautifulSoup
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
 
-def _ensure_nltk_resources():
+def _ensure_nltk_resources() -> None:
     """Download NLTK resources on first run (idempotent)."""
     for resource, lookup in [
         ("stopwords", "corpora/stopwords"),
@@ -33,16 +33,6 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
-def load_json_gz(path: str) -> pd.DataFrame:
-    """Load a gzipped JSON file (JSONL first, fallback to a JSON array)."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File not found: {path}")
-    try:
-        return pd.read_json(path, compression="gzip", lines=True)
-    except ValueError:
-        return pd.read_json(path, compression="gzip", lines=False)
-
-
 def _is_mostly_english(txt: str, threshold: float = 0.9) -> bool:
     """True if ≥ `threshold` of chars are ASCII."""
     if not txt:
@@ -50,7 +40,7 @@ def _is_mostly_english(txt: str, threshold: float = 0.9) -> bool:
     return sum(1 for c in txt if ord(c) < 128) / len(txt) >= threshold
 
 
-def clean_text(txt):
+def clean_text(txt: Optional[str]) -> Optional[str]:
     """Paper Sec 4.1 preprocessing (HTML/URL strip, lowercase, contractions, stopwords, lemmatize)."""
     if txt is None or pd.isna(txt):
         return None

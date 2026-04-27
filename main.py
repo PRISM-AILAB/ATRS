@@ -1,12 +1,31 @@
 import os
 
-import torch
+# Import sklearn before torch — Windows cu121+MKL segfaults pd.read_json otherwise.
 from sklearn.model_selection import train_test_split
+import torch
 
-from src.path import PROCESSED_PATH, SAVE_MODEL_PATH, UTILS_PATH, ATE_RESULT_PATH
-from src.utils import load_yaml, load_parquet, set_seed, get_metrics
-from src.pipeline import DataProcessor, W2VArtifacts, get_data_loader, load_processed_data
-from model.proposed import ProposedModel, proposed_trainer, proposed_tester
+from model.atrs import ATRS, predict, train
+from src.data_processing import (
+    DataProcessor, W2VArtifacts,
+    get_data_loader, load_processed_data,
+)
+from src.path import SAVE_MODEL_PATH, SRC_PATH
+from src.utils import get_metrics, load_yaml, set_seed
+
+
+def run_data_processing(dargs: dict, args: dict, seed: int, fname: str) -> None:
+    """Invoke the DataProcessor pipeline (cache check decides whether to skip)."""
+    DataProcessor(
+        fname=fname,
+        raw_ext=dargs["raw_ext"],
+        test_size=dargs["test_size"],
+        random_state=seed,
+        k_core=dargs["k_core"],
+        aspect_length_percentile=dargs["aspect_length_percentile"],
+        w2v_vector_size=args["w2v_vector_size"],
+        w2v_window=args["w2v_window"],
+        w2v_min_count=args["w2v_min_count"],
+    ).run()
 
 
 def split_train_val_test(seqs: dict, val_ratio: float, seed: int) -> dict:
@@ -31,18 +50,24 @@ def split_train_val_test(seqs: dict, val_ratio: float, seed: int) -> dict:
     }
 
 
-def build_loaders(splits: dict, args: dict):
-    """Wrap each split tuple in a torch DataLoader."""
+def build_loaders(args: dict, fname: str, seed: int) -> tuple:
+    """Load processed arrays, carve val out of train, and wrap each split in a torch DataLoader."""
+    artifacts, seqs = load_processed_data(fname)
+    splits = split_train_val_test(seqs, args["val_ratio"], seed)
+    print(f"[Main] Train shape: ({len(splits['train'][0]):,}, *)")
+    print(f"[Main] Val shape  : ({len(splits['val'][0]):,}, *)")
+    print(f"[Main] Test shape : ({len(splits['test'][0]):,}, *)")
     return (
+        artifacts,
         get_data_loader(args, *splits["train"], shuffle=True),
-        get_data_loader(args, *splits["val"], shuffle=False),
-        get_data_loader(args, *splits["test"], shuffle=False),
+        get_data_loader(args, *splits["val"],   shuffle=False),
+        get_data_loader(args, *splits["test"],  shuffle=False),
     )
 
 
-def build_model(artifacts: W2VArtifacts, args: dict) -> ProposedModel:
-    """Instantiate `ProposedModel` from the persisted artifacts and config args."""
-    return ProposedModel(
+def build_model(artifacts: W2VArtifacts, args: dict) -> ATRS:
+    """Instantiate the ATRS model from the persisted artifacts and config args."""
+    return ATRS(
         num_users=artifacts.num_users,
         num_items=artifacts.num_items,
         user_vocab_size=artifacts.user_vocab_size,
@@ -51,77 +76,50 @@ def build_model(artifacts: W2VArtifacts, args: dict) -> ProposedModel:
         item_aspect_maxlen=artifacts.item_aspect_maxlen,
         user_embedding_matrix=artifacts.user_embedding_matrix,
         item_embedding_matrix=artifacts.item_embedding_matrix,
-        num_heads=args.get("num_heads", 12),
-        id_dim=args.get("id_dim", 128),
-        dropout=args.get("dropout", 0.1),
-        cnn_filters=args.get("cnn_filters", 100),
-        cnn_kernel_size=args.get("cnn_kernel_size", 5),
-        ffn_dim=args.get("ffn_dim", 2048),
+        num_heads=args["num_heads"],
+        id_dim=args["id_dim"],
+        dropout=args["dropout"],
+        cnn_filters=args["cnn_filters"],
+        cnn_kernel_size=args["cnn_kernel_size"],
+        ffn_dim=args["ffn_dim"],
     )
 
 
-def run_data_processing(dargs: dict, args: dict, seed: int, fname: str):
-    """Invoke the DataProcessor pipeline (internal caches decide what to skip)."""
-    DataProcessor(
-        fname=fname,
-        raw_ext=dargs.get("raw_ext", "json.gz"),
-        test_size=dargs.get("test_size", 0.2),
-        random_state=seed,
-        clean_text_col=dargs.get("clean_text_col", "clean_text"),
-        aspect_col=dargs.get("aspect_col", "aspect"),
-        ate_result_dir=dargs.get("ate_result_dir", ATE_RESULT_PATH),
-        ate_device=dargs.get("ate_device", "cuda:0"),
-        user_aspect_col=dargs.get("user_aspect_col", "user_aspect_set"),
-        item_aspect_col=dargs.get("item_aspect_col", "item_aspect_set"),
-        aspect_length_percentile=dargs.get("aspect_length_percentile", 90),
-        w2v_vector_size=args.get("w2v_vector_size", 300),
-        w2v_window=args.get("w2v_window", 5),
-        w2v_min_count=args.get("w2v_min_count", 1),
-    ).run()
+def main() -> None:
+    cfg = load_yaml(os.path.join(SRC_PATH, "config.yaml"))
+    dargs = cfg["data"]
+    args = cfg["args"]
+    fname = dargs["fname"]
 
-
-def main():
-    cfg = load_yaml(os.path.join(UTILS_PATH, "config.yaml"))
-    dargs = cfg.get("data", {})
-    args = cfg.get("args", {})
-    fname = dargs.get("fname")
-    args["fname"] = fname
-
-    seed = cfg.get("seed", 42)
+    seed = cfg["seed"]
     set_seed(seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[main] Device: {device}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU is required to run ATRS; no CUDA device detected.")
+    device = "cuda"
+    print(f"[Main] Device: {device} ({torch.cuda.get_device_name(0)})")
 
     run_data_processing(dargs, args, seed, fname)
 
-    dataset_dir = os.path.join(PROCESSED_PATH, fname)
-    train_df = load_parquet(os.path.join(dataset_dir, "train.parquet"))
-    test_df = load_parquet(os.path.join(dataset_dir, "test.parquet"))
-    print("[main] Train shape:", train_df.shape)
-    print("[main] Test shape :", test_df.shape)
+    artifacts, train_loader, val_loader, test_loader = build_loaders(args, fname, seed)
 
-    artifacts, seqs = load_processed_data(fname)
-    splits = split_train_val_test(seqs, args.get("val_ratio", 0.125), seed)
-    train_loader, val_loader, test_loader = build_loaders(splits, args)
-
-    print("[main] Building PyTorch Model...")
-    print(f"   - User Vocab Size: {artifacts.user_vocab_size} / Item Vocab Size: {artifacts.item_vocab_size}")
-    print(f"   - User Max Len:    {artifacts.user_aspect_maxlen} / Item Max Len:    {artifacts.item_aspect_maxlen}")
-
+    print("[Main] Building PyTorch model...")
+    print(f"[Main] User vocab size: {artifacts.user_vocab_size} / item vocab size: {artifacts.item_vocab_size}")
+    print(f"[Main] User max len:    {artifacts.user_aspect_maxlen} / item max len:    {artifacts.item_aspect_maxlen}")
     model = build_model(artifacts, args)
+
     save_dir = os.path.join(SAVE_MODEL_PATH, fname)
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, "best.pth")
-    model = proposed_trainer(
+    model = train(
         args=args, model=model,
         train_loader=train_loader, val_loader=val_loader,
         best_model_path=best_model_path, device=device,
     )
 
-    test_preds, test_trues = proposed_tester(model, test_loader, device=device)
-    mse, rmse, mae, mape = get_metrics(test_preds, test_trues)
-    print(f"[TEST] RMSE={rmse:.4f}  MSE={mse:.4f}  MAE={mae:.4f}  MAPE={mape:.3f}%")
+    test_preds, test_trues = predict(model, test_loader, device=device)
+    mae, mse, rmse, mape = get_metrics(test_preds, test_trues)
+    print(f"[Test] MAE={mae:.4f}  MSE={mse:.4f}  RMSE={rmse:.4f}  MAPE={mape:.3f}%")
 
 
 if __name__ == "__main__":

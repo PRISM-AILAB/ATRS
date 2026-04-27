@@ -1,34 +1,41 @@
+import json
 import os
 import re
-import json
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pandas as pd
-from pyabsa import ATEPCCheckpointManager
+
+from src.path import PYABSA_WORKDIR
 
 
 @dataclass
 class ATExtractor:
     """Wrapper around PyABSA's pretrained ATE pipeline with DataFrame-index recovery."""
 
+    device: str = "cuda"
     checkpoint: str = "english"
     auto_device: bool = False
-    device: str = "cuda:0"
     cal_perplexity: bool = False
-    result_dir: str = "output_results"
 
     def __post_init__(self):
-        os.makedirs(self.result_dir, exist_ok=True)
-        self.aspect_extractor = ATEPCCheckpointManager.get_aspect_extractor(
-            checkpoint=self.checkpoint,
-            auto_device=self.auto_device,
-            device=self.device,
-            cal_perplexity=self.cal_perplexity,
-        )
+        # PyABSA hardcodes "./checkpoints.json" + result-JSON to CWD; chdir contains them.
+        os.makedirs(PYABSA_WORKDIR, exist_ok=True)
+        cwd = os.getcwd()
+        try:
+            os.chdir(PYABSA_WORKDIR)
+            from pyabsa import ATEPCCheckpointManager
+            self.aspect_extractor = ATEPCCheckpointManager.get_aspect_extractor(
+                checkpoint=self.checkpoint,
+                auto_device=self.auto_device,
+                device=self.device,
+                cal_perplexity=self.cal_perplexity,
+            )
+        finally:
+            os.chdir(cwd)
 
     @staticmethod
-    def _make_marked_texts(df: pd.DataFrame, text_col: str) -> List[str]:
+    def _make_marked_texts(df: pd.DataFrame, text_col: str) -> list[str]:
         """Prepend the row index to each text as '<idx> [SEP] <text>'."""
         if text_col not in df.columns:
             raise KeyError(f"{text_col} column not found in DataFrame.")
@@ -39,16 +46,21 @@ class ATExtractor:
                 print_result: bool = False, pred_sentiment: bool = False,
                 save_result: bool = True) -> None:
         """Run aspect term extraction on every row of `df[text_col]`."""
-        self.aspect_extractor.extract_aspect(
-            inference_source=self._make_marked_texts(df, text_col=text_col),
-            print_result=print_result,
-            pred_sentiment=pred_sentiment,
-            save_result=save_result,
-            result_save_path=self.result_dir,
-        )
+        cwd = os.getcwd()
+        try:
+            os.chdir(PYABSA_WORKDIR)
+            self.aspect_extractor.extract_aspect(
+                inference_source=self._make_marked_texts(df, text_col=text_col),
+                print_result=print_result,
+                pred_sentiment=pred_sentiment,
+                save_result=save_result,
+                result_save_path=".",
+            )
+        finally:
+            os.chdir(cwd)
 
     @staticmethod
-    def _safe_split_sentence(sentence: str) -> Tuple[Optional[int], str]:
+    def _safe_split_sentence(sentence: str) -> tuple[Optional[int], str]:
         """Split PyABSA 'sentence' back into (row_index, text), tolerating whitespace around [SEP]."""
         if sentence is None:
             return None, ""
@@ -62,7 +74,7 @@ class ATExtractor:
         return None, s
 
     @staticmethod
-    def load_results(json_paths: List[str]) -> pd.DataFrame:
+    def _load_results(json_paths: list[str]) -> pd.DataFrame:
         """Merge one or more PyABSA result JSON files into a single DataFrame."""
         all_data = []
         for path in json_paths:
@@ -71,7 +83,7 @@ class ATExtractor:
                 all_data.extend(data if isinstance(data, list) else [data])
         return pd.DataFrame(all_data)
 
-    def results_to_aspect_df(self, df_ate: pd.DataFrame) -> pd.DataFrame:
+    def _results_to_aspect_df(self, df_ate: pd.DataFrame) -> pd.DataFrame:
         """Recover original row index; return a DataFrame with only the `aspect` column."""
         if "sentence" not in df_ate.columns:
             raise KeyError("ATE results must contain 'sentence' column.")
@@ -87,15 +99,14 @@ class ATExtractor:
         return tmp[["aspect"]].copy()
 
     @staticmethod
-    def merge_aspects(df: pd.DataFrame, df_aspect: pd.DataFrame, *,
-                      aspect_col: str = "aspect") -> pd.DataFrame:
+    def _merge_aspects(df: pd.DataFrame, df_aspect: pd.DataFrame, *,
+                       aspect_col: str = "aspect") -> pd.DataFrame:
         """Left-join the extracted aspect column back onto the original DataFrame."""
         if aspect_col not in df_aspect.columns:
             raise KeyError(f"{aspect_col} column not found in df_aspect.")
         return df.merge(df_aspect[[aspect_col]], left_index=True, right_index=True, how="left")
 
     def run(self, df: pd.DataFrame, text_col: str, *,
-            result_json_paths: Optional[List[str]] = None,
             aspect_col: str = "aspect",
             print_result: bool = False,
             pred_sentiment: bool = False,
@@ -104,18 +115,16 @@ class ATExtractor:
         self.extract(df=df, text_col=text_col, print_result=print_result,
                      pred_sentiment=pred_sentiment, save_result=save_result)
 
-        if result_json_paths is None:
-            result_json_paths = (
-                [os.path.join(self.result_dir, fn) for fn in os.listdir(self.result_dir)
-                 if fn.lower().endswith(".json") and "atepc" in fn.lower()]
-                if os.path.exists(self.result_dir) else []
-            )
+        json_paths = [
+            os.path.join(PYABSA_WORKDIR, fn) for fn in os.listdir(PYABSA_WORKDIR)
+            if fn.lower().endswith(".json") and "atepc" in fn.lower()
+        ]
 
-        if not result_json_paths:
-            print(f"Warning: No ATE JSON results found in {self.result_dir}.")
+        if not json_paths:
+            print(f"[ATExtractor] Warning: no ATE JSON results found in {PYABSA_WORKDIR}.")
             df[aspect_col] = [[] for _ in range(len(df))]
             return df
 
-        df_aspect = self.results_to_aspect_df(self.load_results(result_json_paths))
+        df_aspect = self._results_to_aspect_df(self._load_results(json_paths))
         df_aspect = df_aspect.rename(columns={"aspect": aspect_col})
-        return self.merge_aspects(df, df_aspect, aspect_col=aspect_col)
+        return self._merge_aspects(df, df_aspect, aspect_col=aspect_col)

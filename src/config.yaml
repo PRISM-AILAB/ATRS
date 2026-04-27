@@ -1,29 +1,26 @@
 seed: 42
 
 data:
-  fname: Video_Games
+  fname: sample_Musical_Instruments
   raw_ext: jsonl.gz
-
-  clean_text_col: clean_text
-  aspect_col: aspect
-
   test_size: 0.2
 
-  # Aspect sequence length cap.
-  # Value is the p-th percentile of the per-user / per-item aspect-count
-  # distribution. Paper's best settings: Musical 90, Video Games 100, Yelp 75.
+  # Drop users/items with fewer than k interactions. Paper uses 5;
+  k_core: 5
+
+  # p-th percentile of per-user / per-item aspect-count distribution used as the
+  # sequence length cap. Paper's best settings: Musical 90, Video Games 100, Yelp 75.
   aspect_length_percentile: 90
 
 args:
-  device: cuda
-
   # Training
   batch_size: 128
   num_epochs: 100
+  optimizer: adam
   lr: 0.001
   dropout: 0.1
   patience: 5
-  val_ratio: 0.125
+  val_ratio: 0.125          # 0.125 of 80% train = 10% of full
 
   # Model architecture
   id_dim: 128
