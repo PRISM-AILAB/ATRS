@@ -1,5 +1,4 @@
 import os
-import pickle
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import ClassVar
@@ -78,7 +77,7 @@ class W2VArtifacts:
 
 @dataclass
 class DataProcessor:
-    """End-to-end data pipeline: raw JSONL → clean → ATE → W2V → train/test parquet."""
+    """End-to-end data pipeline: raw JSONL → clean → ATE (cached); split → W2V → seqs (in-memory)."""
 
     fname: str
     raw_ext: str
@@ -108,9 +107,6 @@ class DataProcessor:
         self.raw_path           = os.path.join(RAW_PATH, f"{self.fname}.{self.raw_ext}")
         self.preprocessed_path  = os.path.join(PROCESSED_PATH, f"{self.fname}_preprocessed.parquet")
         self.aspects_path       = os.path.join(PROCESSED_PATH, f"{self.fname}_aspects.parquet")
-        self.w2v_cache_path     = os.path.join(PROCESSED_PATH, f"{self.fname}_w2v.pkl")
-        self.train_path         = os.path.join(PROCESSED_PATH, f"{self.fname}_train.parquet")
-        self.test_path          = os.path.join(PROCESSED_PATH, f"{self.fname}_test.parquet")
 
         self.w2v_params = {
             "vector_size": self.w2v_vector_size,
@@ -121,14 +117,6 @@ class DataProcessor:
         }
 
     # ---- cache checks
-
-    def _splits_exist(self) -> bool:
-        """True iff both train and test parquet splits already exist on disk."""
-        return all(os.path.exists(p) for p in (self.train_path, self.test_path))
-
-    def _w2v_cache_exists(self) -> bool:
-        """True iff the W2V pickle cache exists on disk."""
-        return os.path.exists(self.w2v_cache_path)
 
     def _aspects_exists(self) -> bool:
         """True iff the aspect-set parquet exists on disk."""
@@ -204,41 +192,15 @@ class DataProcessor:
     # ---- W2V / sequence building
 
     def _build_w2v_artifacts(self, train: pd.DataFrame, num_users: int, num_items: int) -> W2VArtifacts:
-        """Build (or load from cache) tokenizers, Word2Vec embeddings, and aspect maxlens."""
-        if self._w2v_cache_exists():
-            print(f"[DataProcessor] Loading cached W2V artifacts: {self.w2v_cache_path}")
-            with open(self.w2v_cache_path, "rb") as f:
-                cache = pickle.load(f)
-            user_tokenizer = cache["user_tokenizer"]
-            item_tokenizer = cache["item_tokenizer"]
-            user_emb = cache["user_embedding"]
-            item_emb = cache["item_embedding"]
-            user_vocab_size = cache["user_vocab_size"]
-            item_vocab_size = cache["item_vocab_size"]
-            user_aspect_maxlen = cache["user_aspect_maxlen"]
-            item_aspect_maxlen = cache["item_aspect_maxlen"]
-        else:
-            print("[DataProcessor] Building W2V artifacts (tokenizers, Word2Vec, embeddings)...")
-            user_tokenizer, user_emb, user_vocab_size = self._build_one_side_w2v(
-                train, self.USER_ID_COL, self.USER_ASPECT_COL,
-            )
-            item_tokenizer, item_emb, item_vocab_size = self._build_one_side_w2v(
-                train, self.ITEM_ID_COL, self.ITEM_ASPECT_COL,
-            )
-            user_aspect_maxlen, item_aspect_maxlen = self._compute_aspect_maxlens(train)
-
-            with open(self.w2v_cache_path, "wb") as f:
-                pickle.dump({
-                    "user_tokenizer": user_tokenizer,
-                    "item_tokenizer": item_tokenizer,
-                    "user_embedding": user_emb,
-                    "item_embedding": item_emb,
-                    "user_vocab_size": user_vocab_size,
-                    "item_vocab_size": item_vocab_size,
-                    "user_aspect_maxlen": user_aspect_maxlen,
-                    "item_aspect_maxlen": item_aspect_maxlen,
-                }, f)
-            print(f"[DataProcessor] Saved W2V cache: {self.w2v_cache_path}")
+        """Build tokenizers, Word2Vec embeddings, and aspect maxlens from the train split."""
+        print("[DataProcessor] Building W2V artifacts (tokenizers, Word2Vec, embeddings)...")
+        user_tokenizer, user_emb, user_vocab_size = self._build_one_side_w2v(
+            train, self.USER_ID_COL, self.USER_ASPECT_COL,
+        )
+        item_tokenizer, item_emb, item_vocab_size = self._build_one_side_w2v(
+            train, self.ITEM_ID_COL, self.ITEM_ASPECT_COL,
+        )
+        user_aspect_maxlen, item_aspect_maxlen = self._compute_aspect_maxlens(train)
 
         print(f"[DataProcessor] User vocab size: {user_vocab_size} / item vocab size: {item_vocab_size}")
         print(f"[DataProcessor] Max aspects user: {user_aspect_maxlen} / item: {item_aspect_maxlen}")
@@ -295,17 +257,28 @@ class DataProcessor:
                         padded[i, :len(trunc)] = trunc
                 df[out_col] = padded.tolist()
 
+    def _build_seqs(self, train: pd.DataFrame, test: pd.DataFrame) -> dict:
+        """Materialize numpy arrays from train/test dfs for the data loader."""
+        return {
+            "user_id_train":  train["user_idx"].values.astype(np.int64),
+            "item_id_train":  train["item_idx"].values.astype(np.int64),
+            "y_train":        train[self.RATING_COL].values.astype(np.float32),
+            "user_id_test":   test["user_idx"].values.astype(np.int64),
+            "item_id_test":   test["item_idx"].values.astype(np.int64),
+            "y_test":         test[self.RATING_COL].values.astype(np.float32),
+            "user_seq_train": np.asarray(train["user_seq"].tolist(), dtype=np.int64),
+            "item_seq_train": np.asarray(train["item_seq"].tolist(), dtype=np.int64),
+            "user_seq_test":  np.asarray(test["user_seq"].tolist(),  dtype=np.int64),
+            "item_seq_test":  np.asarray(test["item_seq"].tolist(),  dtype=np.int64),
+        }
+
     # ---- driver
 
-    def run(self) -> None:
-        """Run the full pipeline with 3-tier cache: splits → aspects → preprocessed."""
+    def run(self) -> tuple[W2VArtifacts, dict]:
+        """Cache-resumable through aspects; split + W2V + seqs run in-memory each call."""
         print(f"\n{'=' * 10} Data Processing {'=' * 10}")
         print("[DataProcessor] External resources required on first use: "
               "NLTK corpora (stopwords/wordnet/omw-1.4) and the PyABSA English ATE checkpoint.")
-
-        if self._splits_exist():
-            print(f"[DataProcessor] Found cached splits for '{self.fname}'; skipping pipeline.")
-            return
 
         if self._aspects_exists():
             print(f"[DataProcessor] Resuming from aspects checkpoint: {self.aspects_path}")
@@ -329,51 +302,10 @@ class DataProcessor:
         train, test = self._train_test_split(df)
         artifacts = self._build_w2v_artifacts(train, num_users, num_items)
         self._attach_seq_columns(train, test, artifacts)
-        save_parquet(train, self.train_path)
-        save_parquet(test,  self.test_path)
         print(f"[Stats] Split sizes: train={len(train):,}, test={len(test):,}")
         print("[DataProcessor] Processing complete.")
 
-
-# ---- Training-input loader ----------------------------------------------
-
-def load_processed_data(fname: str, rating_col: str = "rating") -> tuple[W2VArtifacts, dict]:
-    """Load (W2VArtifacts, seqs) from persisted train/test parquet and W2V cache."""
-    train_path = os.path.join(PROCESSED_PATH, f"{fname}_train.parquet")
-    test_path  = os.path.join(PROCESSED_PATH, f"{fname}_test.parquet")
-    w2v_path   = os.path.join(PROCESSED_PATH, f"{fname}_w2v.pkl")
-
-    train = load_parquet(train_path)
-    test  = load_parquet(test_path)
-    with open(w2v_path, "rb") as f:
-        cache = pickle.load(f)
-
-    artifacts = W2VArtifacts(
-        num_users=int(max(train["user_idx"].max(), test["user_idx"].max())) + 1,
-        num_items=int(max(train["item_idx"].max(), test["item_idx"].max())) + 1,
-        user_tokenizer=cache["user_tokenizer"],
-        item_tokenizer=cache["item_tokenizer"],
-        user_embedding_matrix=cache["user_embedding"],
-        item_embedding_matrix=cache["item_embedding"],
-        user_vocab_size=cache["user_vocab_size"],
-        item_vocab_size=cache["item_vocab_size"],
-        user_aspect_maxlen=cache["user_aspect_maxlen"],
-        item_aspect_maxlen=cache["item_aspect_maxlen"],
-    )
-
-    seqs = {
-        "user_id_train":  train["user_idx"].values.astype(np.int64),
-        "item_id_train":  train["item_idx"].values.astype(np.int64),
-        "y_train":        train[rating_col].values.astype(np.float32),
-        "user_id_test":   test["user_idx"].values.astype(np.int64),
-        "item_id_test":   test["item_idx"].values.astype(np.int64),
-        "y_test":         test[rating_col].values.astype(np.float32),
-        "user_seq_train": np.asarray(train["user_seq"].tolist(), dtype=np.int64),
-        "item_seq_train": np.asarray(train["item_seq"].tolist(), dtype=np.int64),
-        "user_seq_test":  np.asarray(test["user_seq"].tolist(),  dtype=np.int64),
-        "item_seq_test":  np.asarray(test["item_seq"].tolist(),  dtype=np.int64),
-    }
-    return artifacts, seqs
+        return artifacts, self._build_seqs(train, test)
 
 
 # ---- Torch Dataset / DataLoader -----------------------------------------

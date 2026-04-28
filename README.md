@@ -17,7 +17,7 @@ The retained aspect terms are encoded with a 1D-CNN over Word2Vec embeddings, fu
 ```bash
 ├── data/
 │   ├── raw/                        # Source datasets — place {fname}.{raw_ext} here
-│   ├── processed/                  # Pipeline parquet caches (preprocessed / aspects / w2v / train / test)
+│   ├── processed/                  # Pipeline parquet caches (preprocessed / aspects)
 │   ├── ate_output/                 # PyABSA workspace + extraction JSON
 │   │   └── .pyabsa/                # Contained pyabsa CWD: checkpoints/, checkpoints.json, result JSON
 │   └── ATRS Architecture.png
@@ -80,7 +80,7 @@ Place the dataset as `data/raw/{fname}.{raw_ext}` where `{fname}` and `{raw_ext}
 `user_id`, `parent_asin`, `text`, `rating`
 (an `aspect` column with pre-extracted terms is optional — if present, the ATE stage is skipped)
 
-The pipeline writes five cached artifacts under `data/processed/` plus the final model checkpoint. On re-run, any artifact already on disk is reused as-is — to invalidate, delete the file.
+The pipeline writes two cached artifacts under `data/processed/` plus the final model checkpoint. On re-run, any artifact already on disk is reused as-is — to invalidate, delete the file. The train/test split, Word2Vec embeddings, and sequence padding are rebuilt in memory on every run.
 
 **`{fname}_preprocessed.parquet`** — after text cleaning and k-core filter:
 raw columns + `clean_text` (HTML/URL-stripped, lowercased, contractions-expanded, stopwords-removed, lemmatized review body)
@@ -88,14 +88,8 @@ raw columns + `clean_text` (HTML/URL-stripped, lowercased, contractions-expanded
 **`{fname}_aspects.parquet`** — after PyABSA aspect extraction and per-user/item aggregation:
 preprocessed columns + `aspect` (per-row term list), `user_aspect_set` (flattened concatenation per user), `item_aspect_set` (flattened concatenation per item)
 
-**`{fname}_w2v.pkl`** — pickled `W2VArtifacts` produced from train aspect sets:
-`user_tokenizer` / `item_tokenizer` (`SimpleTokenizer`), `user_embedding` / `item_embedding` (frozen float32 matrices), `user_vocab_size` / `item_vocab_size`, `user_aspect_maxlen` / `item_aspect_maxlen` (p-th percentile of train aspect-set sizes)
-
-**`{fname}_train.parquet`** / **`{fname}_test.parquet`** — final shuffle split:
-aspect columns + `user_idx` / `item_idx` (LabelEncoder ID mapping) + `user_seq` / `item_seq` (tokenized + zero-padded aspect sequences)
-
 ### Re-runs and caching
-On every call to `python main.py`, the pipeline auto-skips any cache layer already on disk (splits → aspects → preprocessed → raw). To force a stage to re-run, delete the corresponding parquet / pickle. Changing config values that affect upstream output (e.g. `k_core`, `aspect_length_percentile`, `w2v_*`, `random_state`) does **not** auto-invalidate — delete the affected caches manually before re-running.
+On every call to `python main.py`, the pipeline auto-skips any cache layer already on disk (aspects → preprocessed → raw). The train/test split, Word2Vec, and sequence padding always run fresh in memory — so changes to `test_size`, `random_state`, `val_ratio`, `aspect_length_percentile`, or `w2v_*` take effect immediately on the next run. Only `k_core` requires manually deleting `{fname}_preprocessed.parquet` to re-trigger the upstream filter.
 
 PyABSA's `./checkpoints.json` and `./checkpoints/` directory are hardcoded CWD-relative inside the library; ATRS routes them under `data/ate_output/.pyabsa/` via a chdir context so they don't pollute the project root.
 

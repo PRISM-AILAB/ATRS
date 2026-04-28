@@ -5,17 +5,14 @@ from sklearn.model_selection import train_test_split
 import torch
 
 from model.atrs import ATRS, predict, train
-from src.data_processing import (
-    DataProcessor, W2VArtifacts,
-    get_data_loader, load_processed_data,
-)
+from src.data_processing import DataProcessor, W2VArtifacts, get_data_loader
 from src.path import SAVE_MODEL_PATH, SRC_PATH
 from src.utils import get_metrics, load_yaml, set_seed
 
 
-def run_data_processing(dargs: dict, args: dict, seed: int, fname: str) -> None:
-    """Invoke the DataProcessor pipeline (cache check decides whether to skip)."""
-    DataProcessor(
+def run_data_processing(dargs: dict, args: dict, seed: int, fname: str) -> tuple[W2VArtifacts, dict]:
+    """Run the DataProcessor pipeline; returns in-memory artifacts and seqs (no on-disk split cache)."""
+    return DataProcessor(
         fname=fname,
         raw_ext=dargs["raw_ext"],
         test_size=dargs["test_size"],
@@ -50,15 +47,13 @@ def split_train_val_test(seqs: dict, val_ratio: float, seed: int) -> dict:
     }
 
 
-def build_loaders(args: dict, fname: str, seed: int) -> tuple:
-    """Load processed arrays, carve val out of train, and wrap each split in a torch DataLoader."""
-    artifacts, seqs = load_processed_data(fname)
+def build_loaders(args: dict, seqs: dict, seed: int) -> tuple:
+    """Carve val out of train and wrap each split in a torch DataLoader."""
     splits = split_train_val_test(seqs, args["val_ratio"], seed)
     print(f"[Main] Train shape: ({len(splits['train'][0]):,}, *)")
     print(f"[Main] Val shape  : ({len(splits['val'][0]):,}, *)")
     print(f"[Main] Test shape : ({len(splits['test'][0]):,}, *)")
     return (
-        artifacts,
         get_data_loader(args, *splits["train"], shuffle=True),
         get_data_loader(args, *splits["val"],   shuffle=False),
         get_data_loader(args, *splits["test"],  shuffle=False),
@@ -99,9 +94,8 @@ def main() -> None:
     device = "cuda"
     print(f"[Main] Device: {device} ({torch.cuda.get_device_name(0)})")
 
-    run_data_processing(dargs, args, seed, fname)
-
-    artifacts, train_loader, val_loader, test_loader = build_loaders(args, fname, seed)
+    artifacts, seqs = run_data_processing(dargs, args, seed, fname)
+    train_loader, val_loader, test_loader = build_loaders(args, seqs, seed)
 
     print("[Main] Building PyTorch model...")
     print(f"[Main] User vocab size: {artifacts.user_vocab_size} / item vocab size: {artifacts.item_vocab_size}")
