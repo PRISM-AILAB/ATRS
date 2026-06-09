@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from src.path import PYABSA_WORKDIR
+
+# Compat: PyABSA pickles its tokenizer under an older transformers; newer transformers reads
+# self.split_special_tokens, absent on the unpickled object. Default it at the class level.
+if not hasattr(PreTrainedTokenizerBase, "split_special_tokens"):
+    PreTrainedTokenizerBase.split_special_tokens = False
 
 
 @dataclass

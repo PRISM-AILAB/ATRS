@@ -1,18 +1,23 @@
-seed: 42
+seed: 42                    # fixed: train/test split, val carve, Word2Vec (same benchmark across runs)
+train_seed: 42              # model init / training; change this and re-run for another run
 
 data:
   fname: sample_Musical_Instruments
   raw_ext: jsonl.gz
   test_size: 0.2
 
-  # Drop users/items with fewer than k interactions. Paper uses 5;
-  k_core: 5
+  # Drop users/items with fewer than k interactions. Paper (full data): 5. The bundled
+  # sample is review-level random (median ~1 review/user), so 5-core collapses it to 0 rows;
+  # loosened to 2 so the sample exercises the full pipeline. Restore 5 for real datasets.
+  k_core: 2
 
   # p-th percentile of per-user / per-item aspect-count distribution used as the
   # sequence length cap. Paper's best settings: Musical 90, Video Games 100, Yelp 75.
   aspect_length_percentile: 90
 
 args:
+  device: cuda
+
   # Training
   batch_size: 128
   num_epochs: 100

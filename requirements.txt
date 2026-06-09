@@ -1,36 +1,25 @@
-# Python 3.11
+# Python 3.11 — ATRS standalone (subset of the repo-root unified requirements.txt)
 # Setup:
-#   conda create -n atrs python=3.11
-#   conda activate atrs
-#   pip install -r requirements.txt
-#
-# torch + torchvision pull the CUDA 12.1 wheel from PyTorch's index
-# (--extra-index-url below). For a CPU-only install, drop the
-# `--extra-index-url` line and the `+cu121` suffixes — but note that
-# main.py raises RuntimeError when CUDA is unavailable, so a CUDA-capable
-# GPU is required to actually run the pipeline end-to-end.
+#   conda create -n atrs python=3.11 && conda activate atrs && pip install -r requirements.txt
+# torch pulls the CUDA 12.1 wheel; for CPU-only, drop --extra-index-url and the +cu121 suffix.
 
 --extra-index-url https://download.pytorch.org/whl/cu121
 
-# Deep learning frameworks
+# Deep learning framework
 torch==2.3.1+cu121
-torchvision==0.18.1+cu121
 
-# HuggingFace
-transformers==4.29.2
-tokenizers==0.13.3
-sentencepiece==0.2.1
-
-# Aspect term extraction
-# pyabsa nominally pulls the HuggingFace stack as transitive deps, but its resolver
-# doesn't pin to a working combination — pin them explicitly above.
-# DeBERTa fast tokenizer requires protobuf <4; spaCy en_core_web_sm is
-# auto-downloaded by pyabsa but lands in the wrong env, so pin the wheel directly.
+# Aspect term extraction — PyABSA. transformers 4.44.2 works via a 1-line tokenizer-pickle
+# compat shim in src/aspect_extraction.py; en_core_web_sm is auto-loaded by PyABSA.
+transformers==4.44.2
+tokenizers==0.19.1
 pyabsa==2.4.2
 seqeval>=1.2.0
 termcolor>=2.0.0
-protobuf<4
+update-checker==0.18.0             # 1.0.0 breaks metric_visualizer (PyABSA dep): check() signature changed
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# Word embeddings (Word2Vec)
+gensim==4.3.3
 
 # Data / ML
 numpy==1.26.4
@@ -39,10 +28,7 @@ pyarrow>=12.0.0
 # scikit-learn 1.8+ deadlocks with torch+cu121 native libs on read_json — pin to 1.5.x.
 scikit-learn==1.5.2
 
-# Word embedding
-gensim==4.3.3
-
-# NLP / Text
+# NLP / text
 nltk>=3.9.0
 beautifulsoup4>=4.12.0
 contractions>=0.1.73

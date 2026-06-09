@@ -34,7 +34,7 @@ class AspectEncoder(nn.Module):
 # ---- Self-attention block ------------------------------------------------
 
 class SelfAttentionBlock(nn.Module):
-    """Multi-head self-attention + residual FFN (Eqs 5–10)."""
+    """Multi-head self-attention + residual FFN."""
 
     def __init__(self, embed_dim: int, num_heads: int, ffn_dim: int, dropout: float):
         super().__init__()
@@ -52,16 +52,16 @@ class SelfAttentionBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        attn, _ = self.mha(x, x, x)                                              # Eq (7) / (8)
+        attn, _ = self.mha(x, x, x)
         out1 = self.ln1(x + self.dropout(attn))
         ff = self.ffn(out1)
-        return self.ln2(out1 + self.dropout(ff))                                 # Eq (9) / (10)
+        return self.ln2(out1 + self.dropout(ff))
 
 
 # ---- ATRS model ----------------------------------------------------------
 
 class ATRS(nn.Module):
-    """ATRS — Aspect Term-aware Recommender System (paper Sec 3): Aspect Term Extraction Module (upstream, src/aspect_extraction.py) + RS Module (CNN aspect encoder + ID embedding + self-attention + rating MLP)."""
+    """ATRS — Aspect Term-aware Recommender System: Aspect Term Extraction Module (upstream, src/aspect_extraction.py) + RS Module (CNN aspect encoder + ID embedding + self-attention + rating MLP)."""
 
     def __init__(
         self,
@@ -103,23 +103,23 @@ class ATRS(nn.Module):
         self.id_dim = id_dim
         self.num_heads = num_heads
 
-        # ---- 1. Aspect-term encoders (CNN over W2V; Eqs 5–6) -----------
+        # ---- 1. Aspect-term encoders (CNN over W2V) --------------------
         self.user_aspect_encoder = AspectEncoder(user_embedding_matrix, cnn_filters, cnn_kernel_size, id_dim, dropout)
         self.item_aspect_encoder = AspectEncoder(item_embedding_matrix, cnn_filters, cnn_kernel_size, id_dim, dropout)
 
-        # ---- 2. ID embeddings (Eqs 1–2) --------------------------------
+        # ---- 2. ID embeddings --------------------------------
         self.user_id_embedding = nn.Embedding(num_users, id_dim)
         self.item_id_embedding = nn.Embedding(num_items, id_dim)
 
-        # ---- 3. Concat-and-project (Eqs 3–4) ---------------------------
+        # ---- 3. Concat-and-project ---------------------------
         self.user_project = nn.Linear(2 * id_dim, self.attn_dim)
         self.item_project = nn.Linear(2 * id_dim, self.attn_dim)
 
-        # ---- 4. Self-attention blocks (Eqs 7–10) -----------------------
+        # ---- 4. Self-attention blocks -----------------------
         self.user_self_attention = SelfAttentionBlock(self.attn_dim, num_heads, ffn_dim, dropout)
         self.item_self_attention = SelfAttentionBlock(self.attn_dim, num_heads, ffn_dim, dropout)
 
-        # ---- 5. Rating MLP (Eqs 11–12) ---------------------------------
+        # ---- 5. Rating MLP ---------------------------------
         self.regressor = nn.Sequential(
             nn.Linear(2 * self.attn_dim, 128),
             nn.ReLU(),
@@ -137,17 +137,17 @@ class ATRS(nn.Module):
         item_seq = inputs["item_seq"]
 
         at_u = self.user_aspect_encoder(user_seq)
-        e_u  = self.user_id_embedding(user_id)                                   # Eq (2)
-        z_u  = self.user_project(torch.cat([at_u, e_u], dim=-1)).unsqueeze(1)    # Eq (3)
-        F_u  = self.user_self_attention(z_u).squeeze(1)                          # Eqs (7), (9)
+        e_u  = self.user_id_embedding(user_id)
+        z_u  = self.user_project(torch.cat([at_u, e_u], dim=-1)).unsqueeze(1)
+        F_u  = self.user_self_attention(z_u).squeeze(1)
 
         at_v = self.item_aspect_encoder(item_seq)
-        e_v  = self.item_id_embedding(item_id)                                   # Eq (1)
-        z_v  = self.item_project(torch.cat([at_v, e_v], dim=-1)).unsqueeze(1)    # Eq (4)
-        F_v  = self.item_self_attention(z_v).squeeze(1)                          # Eqs (8), (10)
+        e_v  = self.item_id_embedding(item_id)
+        z_v  = self.item_project(torch.cat([at_v, e_v], dim=-1)).unsqueeze(1)
+        F_v  = self.item_self_attention(z_v).squeeze(1)
 
-        O = torch.cat([F_u, F_v], dim=1)                                         # Eq (11)
-        return self.regressor(O)                                                  # Eq (12)
+        O = torch.cat([F_u, F_v], dim=1)
+        return self.regressor(O)
 
 
 # ---- Training / evaluation helpers ---------------------------------------
@@ -216,7 +216,7 @@ def train(
     best_model_path: str,
     device: str,
 ) -> nn.Module:
-    """Adam + MSE (Eq 14) with early stopping; returns model reloaded from best checkpoint."""
+    """Adam + MSE with early stopping; returns model reloaded from best checkpoint."""
     model.to(device)
 
     optimizer = _build_optimizer(args, model)

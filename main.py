@@ -80,6 +80,14 @@ def build_model(artifacts: W2VArtifacts, args: dict) -> ATRS:
     )
 
 
+def resolve_device(requested: str) -> str:
+    """Honor the configured device, falling back to CPU if CUDA was requested but unavailable."""
+    if requested == "cuda" and not torch.cuda.is_available():
+        print("[Main] CUDA requested but not available; falling back to CPU.")
+        return "cpu"
+    return requested
+
+
 def main() -> None:
     cfg = load_yaml(os.path.join(SRC_PATH, "config.yaml"))
     dargs = cfg["data"]
@@ -87,24 +95,26 @@ def main() -> None:
     fname = dargs["fname"]
 
     seed = cfg["seed"]
+    train_seed = cfg["train_seed"]
+    device = resolve_device(args["device"])
+    print(f"[Main] Device: {device}")
+
+    # Data split, val carve, and W2V use the fixed `seed` so re-runs share one benchmark.
     set_seed(seed)
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA GPU is required to run ATRS; no CUDA device detected.")
-    device = "cuda"
-    print(f"[Main] Device: {device} ({torch.cuda.get_device_name(0)})")
-
     artifacts, seqs = run_data_processing(dargs, args, seed, fname)
     train_loader, val_loader, test_loader = build_loaders(args, seqs, seed)
 
     print("[Main] Building PyTorch model...")
     print(f"[Main] User vocab size: {artifacts.user_vocab_size} / item vocab size: {artifacts.item_vocab_size}")
     print(f"[Main] User max len:    {artifacts.user_aspect_maxlen} / item max len:    {artifacts.item_aspect_maxlen}")
+
+    # Model init / dropout / shuffle use `train_seed`; edit it in config and re-run for another run.
+    set_seed(train_seed)
     model = build_model(artifacts, args)
 
     save_dir = os.path.join(SAVE_MODEL_PATH, fname)
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, "best.pth")
+    best_model_path = os.path.join(save_dir, f"best_seed{train_seed}.pth")
     model = train(
         args=args, model=model,
         train_loader=train_loader, val_loader=val_loader,
@@ -113,7 +123,7 @@ def main() -> None:
 
     test_preds, test_trues = predict(model, test_loader, device=device)
     mae, mse, rmse, mape = get_metrics(test_preds, test_trues)
-    print(f"[Test] MAE={mae:.4f}  MSE={mse:.4f}  RMSE={rmse:.4f}  MAPE={mape:.3f}%")
+    print(f"[Test] (train_seed={train_seed}) MAE={mae:.4f}  MSE={mse:.4f}  RMSE={rmse:.4f}  MAPE={mape:.3f}%")
 
 
 if __name__ == "__main__":

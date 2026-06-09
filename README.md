@@ -18,54 +18,49 @@ The retained aspect terms are encoded with a 1D-CNN over Word2Vec embeddings, fu
 ├── data/
 │   ├── raw/                        # Source datasets — place {fname}.{raw_ext} here
 │   ├── processed/                  # Pipeline parquet caches (preprocessed / aspects)
-│   ├── ate_output/                 # PyABSA workspace + extraction JSON
-│   │   └── .pyabsa/                # Contained pyabsa CWD: checkpoints/, checkpoints.json, result JSON
-│   └── ATRS Architecture.png
+│   └── ate_output/                 # PyABSA workspace + extraction JSON
+│       └── .pyabsa/                # Contained pyabsa CWD: checkpoints/, checkpoints.json, result JSON
 │
 ├── model/
-│   ├── atrs.py                     # ATRS architecture, trainer, and predictor
+│   ├── atrs.py                     # ATRS architecture, trainer, predictor
+│   ├── ATRS Architecture.png       # Architecture diagram
 │   └── save/                       # Best checkpoint per dataset (best.pth)
 │
 ├── src/
 │   ├── config.yaml                 # Single source of truth for all hyperparameters
-│   ├── data_processing.py          # DataProcessor pipeline + RecommenderDataset + DataLoader factory
+│   ├── data_processing.py          # DataProcessor pipeline + Dataset/DataLoader factory
 │   ├── aspect_extraction.py        # ATExtractor — PyABSA wrapper for aspect term extraction
-│   ├── preprocessing.py            # Review text cleaning + k-core filter
+│   ├── preprocessing.py            # Review-text cleaning and row filters
 │   ├── path.py                     # Project path constants (auto-creates runtime folders)
-│   └── utils.py                    # Metrics, parquet/yaml/seed helpers, gz loader
+│   └── utils.py                    # Generic helpers — I/O, metrics, seeding
 │
 ├── main.py                         # Entry point: data preparation → train → test
 ├── requirements.txt
-├── README.md
-└── .gitignore
+└── README.md
 ```
 
 ## Model Description
 
-ATRS consists of two sequential modules. The full architecture is illustrated below.
+ATRS consists of two sequential modules. Aspect extraction runs in [`src/aspect_extraction.py`](src/aspect_extraction.py) (orchestrated by [`src/data_processing.py`](src/data_processing.py)); the recommender network is in [`model/atrs.py`](model/atrs.py). The full architecture is illustrated below.
 
 <p align="center">
-  <img src="data/ATRS Architecture.png" alt="ATRS Architecture" width="800">
+  <img src="model/ATRS Architecture.png" alt="ATRS Architecture" width="800">
 </p>
 
 ### 1. Aspect Term Extraction Module
 A pretrained Transformer encoder (PyABSA's English ATE checkpoint, FAST-LCF-ATEPC over DeBERTa-v3-base) reads each cleaned review and emits BIO-tagged aspect terms. Per-row aspect lists are then aggregated into per-user and per-item aspect sets, which become the inputs to the RS module.
 
-Implementation: [`src/aspect_extraction.py`](src/aspect_extraction.py), invoked from [`src/data_processing.py`](src/data_processing.py).
-
 ### 2. Recommender System Module
-Each user and item aspect set is tokenized over a Word2Vec-trained vocabulary, encoded by a 1D-CNN (`AspectEncoder`), and concatenated with a learned ID embedding. The fused vector is projected and passed through a multi-head self-attention + FFN block (`SelfAttentionBlock`, Eqs 5–10) to yield aspect-aware user (`F_u`) and item (`F_v`) representations. Their concatenation is fed to an MLP regressor that outputs the predicted rating (Eqs 11–12).
-
-Implementation: `AspectEncoder`, `SelfAttentionBlock`, `ATRS.regressor` in [`model/atrs.py`](model/atrs.py).
+Each user and item aspect set is tokenized over a Word2Vec-trained vocabulary, encoded by a 1D-CNN (`AspectEncoder`), and concatenated with a learned ID embedding. The fused vector is projected and passed through a multi-head self-attention + FFN block (`SelfAttentionBlock`) to yield aspect-aware user and item representations. Their concatenation is fed to an MLP regressor (`ATRS.regressor`) that outputs the predicted rating.
 
 ## How to Run
 
 ### Configuration
 All hyperparameters live in [`src/config.yaml`](src/config.yaml) — it is the single source of truth. Defaults reproduce the paper experiments.
 
-The `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` wheels in [`requirements.txt`](requirements.txt) target an RTX 3080 Ti (CUDA 12.1). **A CUDA-capable GPU is required** — `main.py` raises `RuntimeError` if no CUDA device is detected.
+A CUDA-capable GPU is recommended; `main.py` falls back to CPU with a warning if CUDA is unavailable. See [`requirements.txt`](requirements.txt) for the GPU wheel and CPU-only setup.
 
-End-to-end run from a fresh checkout:
+End-to-end run:
 ```bash
 conda create -n atrs python=3.11
 conda activate atrs
@@ -74,24 +69,25 @@ python main.py
 ```
 
 ### Data Preparation
-Place the dataset as `data/raw/{fname}.{raw_ext}` where `{fname}` and `{raw_ext}` match `data.fname` / `data.raw_ext` in `config.yaml`.
+Place the dataset as `data/raw/{fname}.{raw_ext}` where `{fname}` and `{raw_ext}` match `data.fname` / `data.raw_ext` in `config.yaml`. The file is read as JSON-lines (one review object per line) — **each line must carry the columns below**, or the run aborts at load with a `KeyError`.
 
-**Required columns in raw JSONL**:
-`user_id`, `parent_asin`, `text`, `rating`
-(an `aspect` column with pre-extracted terms is optional — if present, the ATE stage is skipped)
+| Column | Role |
+|---|---|
+| `user_id` | Reviewer id — user-side aspect aggregation and ID embedding. |
+| `parent_asin` | Product id — item-side aspect aggregation and ID embedding. |
+| `text` | Review body — cleaned, then aspect terms are extracted from it (`review_text` is also accepted as an alias). |
+| `rating` | Ground-truth rating; the regression target the model predicts. |
+| `verified_purchase` | Boolean flag; only verified-purchase reviews are kept. |
 
-The pipeline writes two cached artifacts under `data/processed/` plus the final model checkpoint. On re-run, any artifact already on disk is reused as-is — to invalidate, delete the file. The train/test split, Word2Vec embeddings, and sequence padding are rebuilt in memory on every run.
+Optional: an `aspect` column of pre-extracted per-row aspect lists — if present, the PyABSA extraction stage is skipped. Any other columns are ignored. The pipeline writes two cache layers under `data/processed/`:
 
-**`{fname}_preprocessed.parquet`** — after text cleaning and k-core filter:
-raw columns + `clean_text` (HTML/URL-stripped, lowercased, contractions-expanded, stopwords-removed, lemmatized review body)
-
-**`{fname}_aspects.parquet`** — after PyABSA aspect extraction and per-user/item aggregation:
-preprocessed columns + `aspect` (per-row term list), `user_aspect_set` (flattened concatenation per user), `item_aspect_set` (flattened concatenation per item)
+- **`{fname}_preprocessed.parquet`** — written after text cleaning and the k-core filter.
+  - Columns: the required columns above + `clean_text` (HTML/URL-stripped, lowercased, contraction-expanded, stop-word-removed, lemmatized review body). Any extra raw columns pass through untouched.
+- **`{fname}_aspects.parquet`** — adds the extracted aspect terms and their per-user/item aggregation.
+  - Columns: the preprocessed columns + `aspect` (per-row aspect-term list), `user_aspect_set` / `item_aspect_set` (each id's aspect terms flattened across all its reviews).
 
 ### Re-runs and caching
-On every call to `python main.py`, the pipeline auto-skips any cache layer already on disk (aspects → preprocessed → raw). The train/test split, Word2Vec, and sequence padding always run fresh in memory — so changes to `test_size`, `random_state`, `val_ratio`, `aspect_length_percentile`, or `w2v_*` take effect immediately on the next run. Only `k_core` requires manually deleting `{fname}_preprocessed.parquet` to re-trigger the upstream filter.
-
-PyABSA's `./checkpoints.json` and `./checkpoints/` directory are hardcoded CWD-relative inside the library; ATRS routes them under `data/ate_output/.pyabsa/` via a chdir context so they don't pollute the project root.
+On every `python main.py`, the pipeline resumes from the most-complete cache on disk, checking newest-first (aspects → preprocessed → raw) and falling through to the next-earliest stage. The train/test split, Word2Vec, and sequence padding always run fresh in memory, so changes to `test_size`, `seed`, `val_ratio`, `aspect_length_percentile`, or `w2v_*` take effect on the next run. To re-trigger an upstream stage, delete its parquet.
 
 ## Experimental Results
 
@@ -205,4 +201,4 @@ Assistant Professor, Division of Computer Engineering
 Hansung University
 Email: leecy@hansung.ac.kr
 
-_Last updated: April 2026_
+_Last updated: June 2026_

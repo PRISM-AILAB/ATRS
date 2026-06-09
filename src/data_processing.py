@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from src.aspect_extraction import ATExtractor
 from src.path import PROCESSED_PATH, RAW_PATH
-from src.preprocessing import clean_text, k_core_filter
+from src.text_cleaning import clean_text, k_core_filter
 from src.utils import load_json_gz, load_parquet, save_parquet
 
 
@@ -132,6 +132,12 @@ class DataProcessor:
         """Load raw file, map column aliases, drop rows missing critical fields."""
         df = load_json_gz(self.raw_path)
         print(f"[Stats] Raw rows: {len(df):,}")
+
+        if "verified_purchase" not in df.columns:
+            raise KeyError("Raw data missing required column: 'verified_purchase'")
+        before = len(df)
+        df = df[df["verified_purchase"] == True].reset_index(drop=True)   # noqa: E712 — pandas mask needs ==
+        print(f"[Stats] Dropped {before - len(df):,} unverified rows; remaining {len(df):,}")
 
         for src_col, attr_name in self.COLUMN_ALIASES.items():
             dst_col = getattr(self, attr_name)
@@ -310,7 +316,7 @@ class DataProcessor:
 
 # ---- Torch Dataset / DataLoader -----------------------------------------
 
-@dataclass(eq=False, repr=False)
+@dataclass
 class RecommenderDataset(Dataset):
     """Map-style dataset for (user_id, item_id, user_seq, item_seq, label)."""
 

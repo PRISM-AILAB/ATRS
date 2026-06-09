@@ -41,7 +41,7 @@ def _is_mostly_english(txt: str, threshold: float = 0.9) -> bool:
 
 
 def clean_text(txt: Optional[str]) -> Optional[str]:
-    """Paper Sec 4.1 preprocessing (HTML/URL strip, lowercase, contractions, stopwords, lemmatize)."""
+    """Preprocessing (HTML/URL strip, lowercase, contractions, stopwords, lemmatize)."""
     if txt is None or pd.isna(txt):
         return None
     txt = BeautifulSoup(str(txt), "html.parser").get_text()
